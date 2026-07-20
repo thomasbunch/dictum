@@ -25,9 +25,16 @@ fn remove_fillers(text: &str) -> String {
 }
 
 fn apply_rule(text: &str, rule: &Replacement) -> String {
-    // heard is regex::escape'd so the pattern is always valid; \b needs word
-    // boundaries at both ends of the (possibly multi-word) phrase.
-    let pattern = format!(r"(?i)\b{}\b", regex::escape(&rule.heard));
+    if rule.heard.is_empty() {
+        return text.to_string();
+    }
+    // Only assert a word boundary at an end that is itself a word char. A `\b`
+    // after a symbol (e.g. "c++", "c#", ".net") can never match — the boundary
+    // needs a word char that isn't there — so those rules would silently no-op.
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let lead = if rule.heard.starts_with(is_word) { r"\b" } else { "" };
+    let trail = if rule.heard.ends_with(is_word) { r"\b" } else { "" };
+    let pattern = format!("(?i){lead}{}{trail}", regex::escape(&rule.heard));
     let re = Regex::new(&pattern).expect("escaped pattern is always valid");
     // NoExpand: printed is a literal, not a $-group template.
     re.replace_all(text, NoExpand(&rule.printed)).into_owned()
@@ -93,6 +100,24 @@ mod tests {
     fn multi_word_phrase() {
         let cfg = cfg_with(vec![rule("point break", "Point Break")], false);
         assert_eq!(apply("i love point break so much", &cfg), "i love Point Break so much");
+    }
+
+    #[test]
+    fn non_word_char_heard_matches() {
+        // "c++" ends in a non-word char: a trailing \b can never match there, so
+        // the boundary must be dropped on that end (else this silently no-ops).
+        let cfg = cfg_with(vec![rule("c++", "cpp")], false);
+        assert_eq!(apply("i love c++ here", &cfg), "i love cpp here");
+        // Leading boundary still protects the word-char end: no partial hit.
+        let cfg2 = cfg_with(vec![rule(".net", "dotnet")], false);
+        assert_eq!(apply("use .net today", &cfg2), "use dotnet today");
+    }
+
+    #[test]
+    fn unicode_word_boundary() {
+        // Non-ASCII word chars still get boundary assertions on both ends.
+        let cfg = cfg_with(vec![rule("naïve", "naive")], false);
+        assert_eq!(apply("a naïve idea", &cfg), "a naive idea");
     }
 
     #[test]

@@ -21,9 +21,9 @@ pub fn snapshot_text() -> Option<String> {
 }
 
 /// Write `text` as CF_UNICODETEXT, marked excluded from Clipboard History and
-/// Cloud Clipboard sync. Newlines are normalized to CRLF for Win32 paste targets.
+/// Cloud Clipboard sync. Callers pass already-CRLF-normalized text (see
+/// `inject::normalize_newlines`).
 pub fn write_excluded(text: &str) -> SysResult<()> {
-    let text = normalize_newlines(text);
     let _clip = Clipboard::new_attempts(10)?;
     // set_string empties the clipboard first — it MUST run before the exclusion
     // formats, which are layered on with set_without_clear (no empty).
@@ -46,23 +46,4 @@ pub fn restore_text(text: &str) -> SysResult<()> {
     let _clip = Clipboard::new_attempts(10)?;
     raw::set_string(text)?;
     Ok(())
-}
-
-/// `\n` -> `\r\n` without doubling an existing `\r\n`.
-fn normalize_newlines(text: &str) -> String {
-    text.replace("\r\n", "\n").replace('\n', "\r\n")
-}
-
-#[cfg(test)]
-mod tests {
-    use super::normalize_newlines;
-
-    #[test]
-    fn crlf_normalization() {
-        assert_eq!(normalize_newlines("a\nb"), "a\r\nb");
-        assert_eq!(normalize_newlines("a\r\nb"), "a\r\nb"); // no doubling
-        assert_eq!(normalize_newlines("a\n\nb"), "a\r\n\r\nb");
-        assert_eq!(normalize_newlines("plain"), "plain");
-        assert_eq!(normalize_newlines("end\n"), "end\r\n");
-    }
 }

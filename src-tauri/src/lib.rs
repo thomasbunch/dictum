@@ -120,6 +120,9 @@ impl Effects for RealEffects {
         self.tray
             .set_state(if rec { TrayState::Recording } else { TrayState::Idle });
     }
+    fn set_tray_error(&mut self) {
+        self.tray.set_state(TrayState::Error);
+    }
     fn toast(&mut self, msg: String) {
         // No dedicated toast window in v1 (FocusChanged / ClipboardManual hold the
         // text for PasteLast). Surface as an app event so a future listener can
@@ -128,9 +131,12 @@ impl Effects for RealEffects {
         eprintln!("toast: {msg}");
         let _ = self.app.emit("toast", msg);
     }
+    fn foreground_exe(&mut self, hwnd: isize) -> Option<String> {
+        crate::inject::exe_for_hwnd(hwnd)
+    }
     fn append_history(&mut self, raw: String, text: String, exe: Option<String>) {
         // append() no-ops internally when keep_transcripts is off / retention is
-        // KeepNothing. exe is None in v1 (coordinator has no foreground exe).
+        // KeepNothing. exe is resolved from the target window (PLAN §9).
         let cfg = self.config.lock().unwrap().clone();
         let _ = self
             .history

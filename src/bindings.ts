@@ -55,7 +55,9 @@ export interface ModelInfo {
 }
 
 export type DownloadProgress =
-  | { t: "progress"; pct: number; mbDone: number; mbTotal: number }
+  // snake_case fields: types.rs's enum-level rename_all renames only the variant
+  // tag, not struct-variant fields, so the wire keys stay mb_done / mb_total.
+  | { t: "progress"; pct: number; mb_done: number; mb_total: number }
   | { t: "verifying" }
   | { t: "done" }
   | { t: "failed"; error: string };

@@ -4,11 +4,14 @@
 
 use tauri::{AppHandle, Manager, PhysicalPosition};
 
-/// Design gap above the work-area bottom (§2.1) plus a taskbar allowance.
-/// ponytail: fixed 48px taskbar allowance instead of Monitor::work_area() —
-/// work_area()'s Rect shape is version-fragile in tauri 2.11 and position()/
-/// size() are rock-solid. Swap to work_area() if a confirmed signature lands.
-const GAP_LOGICAL: f64 = 48.0 + 48.0;
+/// DESIGN §2.1: HUD bottom edge sits 48px above the work-area bottom (above the
+/// taskbar). We query the real per-monitor work area (Win32 GetMonitorInfo), so
+/// this is the true gap — no taskbar guessing.
+const GAP_LOGICAL: f64 = 48.0;
+
+/// Fallback gap when the work-area query fails: full-monitor height minus a
+/// 48px taskbar allowance plus the 48px design gap.
+const GAP_LOGICAL_FALLBACK: f64 = 48.0 + 48.0;
 
 /// Call once at startup: make the overlay permanently click-through.
 pub fn setup(app: &AppHandle) {
@@ -32,10 +35,20 @@ pub fn position_and_show(app: &AppHandle) {
             (Ok(cursor), Ok(win)) => match w.monitor_from_point(cursor.x, cursor.y) {
                 Ok(Some(mon)) => {
                     let scale = mon.scale_factor();
-                    let (mp, ms) = (mon.position(), mon.size());
-                    let (x, y) = bottom_center(
-                        mp.x, mp.y, ms.width, ms.height, win.width, win.height, gap_px(scale),
-                    );
+                    // Prefer the real work area (excludes taskbar, honors auto-hide
+                    // and side-docked taskbars); fall back to full monitor + taskbar
+                    // allowance if the Win32 query fails.
+                    let (rx, ry, rw, rh, gap_logical) = match work_area(cursor.x as i32, cursor.y as i32) {
+                        Some((l, t, r, b)) => {
+                            (l, t, (r - l) as u32, (b - t) as u32, GAP_LOGICAL)
+                        }
+                        None => {
+                            let (mp, ms) = (mon.position(), mon.size());
+                            (mp.x, mp.y, ms.width, ms.height, GAP_LOGICAL_FALLBACK)
+                        }
+                    };
+                    let (x, y) =
+                        bottom_center(rx, ry, rw, rh, win.width, win.height, gap_px(gap_logical, scale));
                     if let Err(e) = w.set_position(PhysicalPosition::new(x, y)) {
                         eprintln!("overlay: set_position failed: {e}");
                     }
@@ -64,8 +77,31 @@ pub fn hide(app: &AppHandle) {
     });
 }
 
-fn gap_px(scale: f64) -> i32 {
-    (GAP_LOGICAL * scale).round() as i32
+fn gap_px(logical: f64, scale: f64) -> i32 {
+    (logical * scale).round() as i32
+}
+
+/// Real per-monitor work-area rect (physical px) for the monitor under `(x, y)`,
+/// via Win32 GetMonitorInfo. Excludes the taskbar and honors auto-hide / side-
+/// docked / non-default-height taskbars. `None` on any query failure.
+fn work_area(x: i32, y: i32) -> Option<(i32, i32, i32, i32)> {
+    use windows::Win32::Foundation::POINT;
+    use windows::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    };
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        let mut mi = MONITORINFO {
+            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
+        if GetMonitorInfoW(hmon, &mut mi).as_bool() {
+            let r = mi.rcWork;
+            Some((r.left, r.top, r.right, r.bottom))
+        } else {
+            None
+        }
+    }
 }
 
 /// Pure placement math (physical pixels). Extracted for testing.
@@ -97,7 +133,10 @@ mod tests {
 
     #[test]
     fn gap_scales_with_dpi() {
-        assert_eq!(gap_px(1.0), 96);
-        assert_eq!(gap_px(1.5), 144);
+        // 48px design gap above the work-area bottom (§2.1), DPI-scaled.
+        assert_eq!(gap_px(GAP_LOGICAL, 1.0), 48);
+        assert_eq!(gap_px(GAP_LOGICAL, 1.5), 72);
+        // Fallback (full monitor + taskbar allowance).
+        assert_eq!(gap_px(GAP_LOGICAL_FALLBACK, 1.0), 96);
     }
 }

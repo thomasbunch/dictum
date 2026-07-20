@@ -47,7 +47,12 @@ pub trait Effects {
     fn show_overlay(&mut self);
     fn hide_overlay(&mut self);
     fn set_tray_recording(&mut self, rec: bool);
+    /// Drive the tray to its NO MICROPHONE error state (DESIGN §3.1). Cleared by
+    /// the next `set_tray_recording` on the following session start.
+    fn set_tray_error(&mut self);
     fn toast(&mut self, msg: String);
+    /// Exe file name owning `hwnd`, for the history per-app column (PLAN §9).
+    fn foreground_exe(&mut self, hwnd: isize) -> Option<String>;
     fn append_history(&mut self, raw: String, text: String, exe: Option<String>);
     fn apply_replacements(&mut self, raw: &str) -> String;
     fn set_esc_armed(&mut self, armed: bool);
@@ -200,6 +205,26 @@ impl Coordinator {
         self.timer = Some((fx.now() + Duration::from_millis(HUD_CANCELLED_MS), Timer::HideHud));
     }
 
+    /// True while real captured speech is still in flight or decoded — a
+    /// mid-hold segment, the death-path tail, or an already-decoded text.
+    fn has_pending_audio(&self) -> bool {
+        self.outstanding > 0 || !self.decode_queue.is_empty() || !self.texts.is_empty()
+    }
+
+    /// Terminal failure: bump generation (drop any in-flight decodes), error cue,
+    /// DESIGN §1.2 copy on the HUD, end the session, 4 s hide timer. `tray_error`
+    /// additionally drives the tray NO MICROPHONE glyph/menu row.
+    fn fail(&mut self, fx: &mut dyn Effects, msg: &str, tray_error: bool) {
+        self.gen = self.gen.wrapping_add(1);
+        self.cue(fx, CueKind::Error);
+        self.set_state(fx, HudState::Error { msg: msg.into() });
+        self.end_session(fx);
+        if tray_error {
+            fx.set_tray_error();
+        }
+        self.timer = Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+    }
+
     fn to_awaiting_tail(&mut self, fx: &mut dyn Effects) {
         fx.stop_capture();
         self.cue(fx, CueKind::Stop); // stop cue plays BEFORE decode
@@ -262,7 +287,8 @@ impl Coordinator {
             InjectOutcome::Injected { chars } => {
                 self.last_text = Some(text.clone());
                 if record {
-                    fx.append_history(raw, text, None);
+                    let exe = fx.foreground_exe(self.target_hwnd);
+                    fx.append_history(raw, text, exe);
                 }
                 self.set_state(fx, HudState::Injected { chars });
                 self.end_session(fx);
@@ -301,6 +327,21 @@ impl Coordinator {
                     fx,
                     HudState::Error { msg: "COPIED TO CLIPBOARD — PASTE MANUALLY".into() },
                 );
+                self.end_session(fx);
+                self.timer =
+                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+            }
+            InjectOutcome::ClipboardUnavailable => {
+                // The clipboard write genuinely failed — do NOT claim a copy that
+                // didn't happen (PLAN §1.4). Text survives only in last_text; the
+                // remedy is PasteLast (which retries the write).
+                self.last_text = Some(text);
+                self.cue(fx, CueKind::Error);
+                self.set_state(
+                    fx,
+                    HudState::Error { msg: "CLIPBOARD BUSY — TRY AGAIN".into() },
+                );
+                fx.toast("Clipboard busy — could not copy. Use Paste last to retry.".into());
                 self.end_session(fx);
                 self.timer =
                     Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
@@ -404,15 +445,30 @@ impl Coordinator {
                 self.dispatch_or_queue(fx, samples);
                 self.enter_decoding(fx);
             }
+            // Death-path tail: on mid-recording device death the worker flushes the
+            // tail (finalize) BEFORE sending CaptureDead, while we're still Recording
+            // (no HotkeyUp occurred). Accumulate it; the CaptureDead that immediately
+            // follows decodes it (PLAN §4.5 — unplug must not lose audio silently).
+            (State::Recording { .. }, TailSegment(samples)) => {
+                self.dispatch_or_queue(fx, samples);
+            }
             // Late segment that closed just before release lands while awaiting
             // the tail — keep accumulating it.
             (State::AwaitingTail, SegmentClosed(samples)) => {
                 self.dispatch_or_queue(fx, samples);
             }
             (State::Recording { .. }, CaptureDead(_)) | (State::AwaitingTail, CaptureDead(_)) => {
-                // No more audio is coming — decode what we have.
-                self.cue(fx, CueKind::Error);
-                self.enter_decoding(fx);
+                if self.has_pending_audio() {
+                    // Real captured speech is buffered (incl. the death-path tail) —
+                    // decode & inject it, with the PLAN §4.5 error earcon.
+                    self.cue(fx, CueKind::Error);
+                    self.enter_decoding(fx);
+                } else {
+                    // The mic never delivered audio (unplugged before speech, no
+                    // device, privacy toggle off) — surface NO MICROPHONE verbatim
+                    // (DESIGN §1.2) + tray error, not a misleading DISCARDED.
+                    self.fail(fx, "NO MICROPHONE", true);
+                }
             }
             (_, CaptureDead(_)) => {
                 self.cue(fx, CueKind::Error);
@@ -430,9 +486,12 @@ impl Coordinator {
             }
             (_, DecodeFailed { generation, error }) => {
                 if generation == self.gen {
+                    // A failed segment must not silently vanish, nor let the other
+                    // segments inject as a partial "success" (PLAN §1.4). Abandon the
+                    // utterance and surface the error. fail() bumps the generation,
+                    // dropping any sibling in-flight decodes.
                     eprintln!("coordinator: decode failed: {error}");
-                    self.outstanding = self.outstanding.saturating_sub(1);
-                    self.try_finalize(fx);
+                    self.fail(fx, "MODEL NOT FOUND", false);
                 }
             }
 
@@ -570,8 +629,9 @@ mod tests {
         ShowOverlay,
         HideOverlay,
         Tray(bool),
+        TrayError,
         Toast(String),
-        History { raw: String, text: String },
+        History { raw: String, text: String, exe: Option<String> },
         EscArmed(bool),
     }
 
@@ -674,11 +734,17 @@ mod tests {
         fn set_tray_recording(&mut self, rec: bool) {
             self.calls.push(Call::Tray(rec));
         }
+        fn set_tray_error(&mut self) {
+            self.calls.push(Call::TrayError);
+        }
         fn toast(&mut self, msg: String) {
             self.calls.push(Call::Toast(msg));
         }
-        fn append_history(&mut self, raw: String, text: String, _exe: Option<String>) {
-            self.calls.push(Call::History { raw, text });
+        fn foreground_exe(&mut self, _hwnd: isize) -> Option<String> {
+            Some("editor.exe".into())
+        }
+        fn append_history(&mut self, raw: String, text: String, exe: Option<String>) {
+            self.calls.push(Call::History { raw, text, exe });
         }
         fn apply_replacements(&mut self, raw: &str) -> String {
             self.replaced.clone().unwrap_or_else(|| raw.to_string())
@@ -737,7 +803,12 @@ mod tests {
 
         // Combined "hello world" injected, history appended, HUD Injected.
         assert!(fx.has(&Call::Inject("hello world".into())));
-        assert!(fx.has(&Call::History { raw: "hello world".into(), text: "hello world".into() }));
+        // Focused exe is resolved from target_hwnd and recorded (PLAN §9).
+        assert!(fx.has(&Call::History {
+            raw: "hello world".into(),
+            text: "hello world".into(),
+            exe: Some("editor.exe".into()),
+        }));
         assert_eq!(fx.huds().last().unwrap(), "injected:5");
         assert!(fx.has(&Call::Tray(false)));
         assert!(fx.has(&Call::EscArmed(false)));
@@ -871,10 +942,138 @@ mod tests {
         c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx);
         c.handle(CoordMsg::DecodeDone { generation: g, text: "buffered".into() }, &mut fx);
 
+        // Mid-recording death: the worker flushes the tail (finalize) BEFORE
+        // CaptureDead, while we're still Recording. The tail must be decoded, not
+        // dropped (PLAN §4.5 — unplug must not lose audio silently).
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
         c.handle(CoordMsg::CaptureDead("unplugged".into()), &mut fx);
         assert!(fx.has(&Call::Cue(CueKind::Error)));
-        // Already-decoded buffered text is injected (no tail needed).
-        assert!(fx.has(&Call::Inject("buffered".into())));
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "tail".into() }, &mut fx);
+        // Both the pre-death segment AND the death-path tail are injected.
+        assert!(fx.has(&Call::Inject("buffered tail".into())));
+    }
+
+    #[test]
+    fn capture_dead_with_no_audio_shows_no_microphone() {
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0]);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        // Device dies before any speech was captured/decoded -> NO MICROPHONE
+        // (DESIGN §1.2 verbatim) + tray error, not a misleading DISCARDED.
+        c.handle(CoordMsg::CaptureDead("no input device".into()), &mut fx);
+        assert!(fx.has(&Call::Cue(CueKind::Error)));
+        assert_eq!(fx.huds().last().unwrap(), "error:NO MICROPHONE");
+        assert!(fx.has(&Call::TrayError));
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn decode_failure_surfaces_error_and_drops_partial() {
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0, 600]);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        // One segment decoded fine, then the tail's decode fails.
+        c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "good".into() }, &mut fx);
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
+        c.handle(CoordMsg::DecodeFailed { generation: g, error: "boom".into() }, &mut fx);
+
+        // No partial inject of the successful segment; an honest error instead.
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
+        assert_eq!(fx.huds().last().unwrap(), "error:MODEL NOT FOUND");
+        assert!(fx.has(&Call::Cue(CueKind::Error)));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn awaiting_tail_segment_is_decoded_not_dropped() {
+        // A VAD segment that closes in-flight can land after HotkeyUp (AwaitingTail)
+        // but before the tail — it must still be decoded (PLAN §1.3, no lost words).
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0, 600]);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::HotkeyUp, &mut fx); // -> AwaitingTail
+        assert!(matches!(c.state, State::AwaitingTail));
+        c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx); // late segment in AwaitingTail
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx); // -> Decoding
+        assert!(matches!(c.state, State::Decoding));
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "a".into() }, &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "b".into() }, &mut fx);
+        // The AwaitingTail segment was decoded and concatenated, not dropped.
+        assert!(fx.has(&Call::Inject("a b".into())));
+    }
+
+    #[test]
+    fn unload_on_idle_ensures_model_on_start() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(Config {
+            hotkey_mode: HotkeyMode::Hold,
+            unload_on_idle: true,
+            ..Default::default()
+        });
+        // Model not yet resident -> start must warm it (R4 / PLAN §10.3).
+        c.model_status = ModelStatus::Loading { pct: 0 };
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        assert!(fx.has(&Call::EnsureModel));
+    }
+
+    #[test]
+    fn unload_on_idle_unloads_after_hide() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(Config {
+            hotkey_mode: HotkeyMode::Hold,
+            unload_on_idle: true,
+            ..Default::default()
+        });
+        // Model Ready by default; run the happy path to an inject (arms HideHud).
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "hi".into() }, &mut fx);
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "there".into() }, &mut fx);
+        assert!(fx.has(&Call::Inject("hi there".into())));
+
+        // HideHud fires -> overlay hides AND the idle-unload timer arms.
+        c.fire_timer(&mut fx);
+        assert!(fx.has(&Call::HideOverlay));
+        assert!(!fx.has(&Call::UnloadModel)); // not yet — only armed
+        // UnloadIdle fires -> model is dropped.
+        c.fire_timer(&mut fx);
+        assert!(fx.has(&Call::UnloadModel));
+    }
+
+    #[test]
+    fn no_unload_when_idle_unload_disabled() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // unload_on_idle=false default
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "x".into() }, &mut fx);
+
+        c.fire_timer(&mut fx); // HideHud -> hide, but no idle-unload armed
+        assert!(fx.has(&Call::HideOverlay));
+        c.fire_timer(&mut fx); // nothing armed
+        assert!(!fx.has(&Call::UnloadModel));
     }
 
     #[test]

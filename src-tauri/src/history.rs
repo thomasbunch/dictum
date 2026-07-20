@@ -119,7 +119,7 @@ impl History {
                 self.conn.execute("DELETE FROM records", [])?;
                 return Ok(());
             }
-            Retention::Hours24 => 3_600_000i64,
+            Retention::Hours24 => 24 * 3_600_000i64,
             Retention::Days7 => 7 * 86_400_000i64,
             Retention::Days30 => 30 * 86_400_000i64,
         };
@@ -247,6 +247,34 @@ mod tests {
         let records = h.list(None).unwrap();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].raw, "fresh");
+        cleanup(&path);
+    }
+
+    #[test]
+    fn purge_retention_keeps_inside_drops_outside_boundary() {
+        let path = temp_db("retention_boundary");
+        let mut cfg = Config::default();
+        cfg.retention = Retention::Hours24;
+        let mut h = History::open_at(&path, &cfg).unwrap();
+        let window = 24 * 3_600_000i64;
+        // One row just inside the 24h window, one just outside it.
+        h.conn
+            .execute(
+                "INSERT INTO records (ts, raw, text, exe) VALUES (?1, 'inside', 'Inside.', NULL)",
+                params![now_millis() - (window - 60_000)],
+            )
+            .unwrap();
+        h.conn
+            .execute(
+                "INSERT INTO records (ts, raw, text, exe) VALUES (?1, 'outside', 'Outside.', NULL)",
+                params![now_millis() - (window + 60_000)],
+            )
+            .unwrap();
+        h.append("trig", "Trig.", None, &cfg).unwrap(); // triggers purge_retention
+        let raws: Vec<String> = h.list(None).unwrap().into_iter().map(|r| r.raw).collect();
+        assert!(raws.contains(&"inside".to_string()), "row just inside window must be kept");
+        assert!(raws.contains(&"trig".to_string()));
+        assert!(!raws.contains(&"outside".to_string()), "row just outside window must be dropped");
         cleanup(&path);
     }
 

@@ -41,7 +41,14 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 // Theme: dataset.field drives src/tokens.css [data-field="X"] selectors.
 // ---------------------------------------------------------------------------
 export function applyTheme(cfg: Config): void {
-  document.documentElement.dataset.field = cfg.theme;
+  const root = document.documentElement;
+  // Crossfade only on an actual theme change (DESIGN §7, 160ms) — never on the
+  // first apply, so page load doesn't flash a transition.
+  if (root.dataset.field && root.dataset.field !== cfg.theme) {
+    root.classList.add("theming");
+    window.setTimeout(() => root.classList.remove("theming"), 180);
+  }
+  root.dataset.field = cfg.theme;
 }
 
 /** Fetches config, applies theme, and keeps it live via the config://changed event. */

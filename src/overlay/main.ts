@@ -276,7 +276,13 @@ function onHudEvent(e: HudEvent) {
 // --- theme -----------------------------------------------------------------
 
 function applyTheme(theme: string) {
-  document.documentElement.dataset.field = theme;
+  const root = document.documentElement;
+  // Crossfade the pill colors on an actual theme change only (DESIGN §7, 160ms).
+  if (root.dataset.field && root.dataset.field !== theme) {
+    root.classList.add("theming");
+    window.setTimeout(() => root.classList.remove("theming"), 180);
+  }
+  root.dataset.field = theme;
   readPalette();
   if (!loopRunning) render(performance.now()); // repaint the static frame in the new colors
 }

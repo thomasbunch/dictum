@@ -207,6 +207,9 @@ pub enum InjectOutcome {
     FocusChanged,
     /// All backends failed: text is on the clipboard, paste manually.
     ClipboardManual(String),
+    /// The clipboard write itself failed (lock contention exhausted retries) —
+    /// text is held for PasteLast only. Never claim a copy that didn't happen.
+    ClipboardUnavailable,
 }
 
 // ---------------------------------------------------------------------------

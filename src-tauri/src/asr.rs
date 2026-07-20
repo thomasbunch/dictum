@@ -115,7 +115,10 @@ fn ensure(rec: &mut Option<OfflineRecognizer>, tx: &Sender<CoordMsg>) -> bool {
             true
         }
         None => {
-            status(ModelStatus::Error("recognizer failed to initialize".into()));
+            // Files present but the recognizer wouldn't init — surface the only
+            // sanctioned ASR-failure copy (DESIGN §1.2). Keep the detail in the log.
+            eprintln!("asr: recognizer failed to initialize");
+            status(ModelStatus::Error("MODEL NOT FOUND".into()));
             false
         }
     }
