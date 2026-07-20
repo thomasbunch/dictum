@@ -103,10 +103,12 @@ pub enum HudState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
-    /// Chord in tauri-plugin-global-shortcut syntax, e.g. "Ctrl+Alt+Space".
+    /// Chord in tauri-plugin-global-shortcut syntax, e.g. "Ctrl+Alt+D".
     /// The global-shortcut backend (global-hotkey) requires a non-modifier main
     /// key, so modifier-only combos like "Ctrl+Super" are NOT registerable —
     /// bare-modifier PTT is deferred to the win-hotkeys backend (PLAN §121, v1.1).
+    /// Ctrl+Alt+Space was rejected: the Claude desktop app registers it for its
+    /// own dictation (verified colliding on a real machine).
     pub hotkey: String,
     pub hotkey_mode: HotkeyMode,
     /// None = system default input device.
@@ -127,7 +129,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hotkey: "Ctrl+Alt+Space".into(),
+            hotkey: "Ctrl+Alt+D".into(),
             hotkey_mode: HotkeyMode::Both,
             input_device: None,
             audio_cues: true,

@@ -185,7 +185,9 @@ pub fn run() {
             let init_cfg = config.lock().unwrap().clone();
             let (tx, rx) = std::sync::mpsc::channel::<CoordMsg>();
 
-            let res_dir = handle.path().resource_dir()?;
+            // Bundled files keep their config-relative "resources/" prefix under
+            // resource_dir (verified: exe-dir/resources/ in dev and bundle).
+            let res_dir = handle.path().resource_dir()?.join("resources");
             let vad_path = res_dir.join("silero_vad.onnx");
 
             let audio = audio::AudioPipeline::new(tx.clone(), vad_path);

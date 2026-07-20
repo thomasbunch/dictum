@@ -27,9 +27,12 @@ body.show {
   display: flex;
 }
 
+/* DEVIATION from DESIGN §2.1's 72px: "LISTENING" at 11px SemiBold + 0.18em
+   tracking measures ~79px — the spec's own column can't hold its own longest
+   status word on one line. 80px keeps the 8px grid; the lane gives up 8px. */
 .status {
-  flex: 0 0 72px;
-  width: 72px;
+  flex: 0 0 80px;
+  width: 80px;
   display: flex;
   flex-direction: column;
   justify-content: flex-start;
@@ -45,7 +48,7 @@ body.show {
   white-space: nowrap;
 }
 
-/* 320 = 8(pad) + 72(status) + 7(gutter) + 1(hair) + 224(lane) + 8(pad) — the
+/* 320 = 8(pad) + 80(status) + 7(gutter) + 1(hair) + 216(lane) + 8(pad) — the
    7px gutter is DESIGN §2.1's unstated remainder between the status column
    and the hairline; the hairline itself sits flush against the lane. */
 .hair {

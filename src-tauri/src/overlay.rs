@@ -19,23 +19,49 @@ pub fn setup(app: &AppHandle) {
 
 /// Position bottom-center on the cursor's monitor and show. No animation here —
 /// the webview fades opacity (§2.4).
+///
+/// Runs on the main thread: the coordinator calls this from its own thread and
+/// window show/position/monitor queries proved unreliable off-main (observed:
+/// window stayed hidden at its default position). run_on_main_thread is the
+/// documented-safe path; failures are logged, never swallowed (PLAN §1.4).
 pub fn position_and_show(app: &AppHandle) {
-    let Some(w) = app.get_webview_window("overlay") else { return };
-    if let (Ok(cursor), Ok(win)) = (w.cursor_position(), w.outer_size()) {
-        if let Ok(Some(mon)) = w.monitor_from_point(cursor.x, cursor.y) {
-            let scale = mon.scale_factor();
-            let (mp, ms) = (mon.position(), mon.size());
-            let (x, y) = bottom_center(mp.x, mp.y, ms.width, ms.height, win.width, win.height, gap_px(scale));
-            let _ = w.set_position(PhysicalPosition::new(x, y));
+    let handle = app.clone();
+    let r = app.run_on_main_thread(move || {
+        let Some(w) = handle.get_webview_window("overlay") else { return };
+        match (w.cursor_position(), w.outer_size()) {
+            (Ok(cursor), Ok(win)) => match w.monitor_from_point(cursor.x, cursor.y) {
+                Ok(Some(mon)) => {
+                    let scale = mon.scale_factor();
+                    let (mp, ms) = (mon.position(), mon.size());
+                    let (x, y) = bottom_center(
+                        mp.x, mp.y, ms.width, ms.height, win.width, win.height, gap_px(scale),
+                    );
+                    if let Err(e) = w.set_position(PhysicalPosition::new(x, y)) {
+                        eprintln!("overlay: set_position failed: {e}");
+                    }
+                }
+                other => eprintln!("overlay: monitor_from_point failed: {other:?}"),
+            },
+            (c, s) => eprintln!("overlay: cursor/size query failed: {:?} {:?}", c.err(), s.err()),
         }
+        if let Err(e) = w.show() {
+            eprintln!("overlay: show failed: {e}");
+        }
+    });
+    if let Err(e) = r {
+        eprintln!("overlay: run_on_main_thread failed: {e}");
     }
-    let _ = w.show();
 }
 
 pub fn hide(app: &AppHandle) {
-    if let Some(w) = app.get_webview_window("overlay") {
-        let _ = w.hide();
-    }
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("overlay") {
+            if let Err(e) = w.hide() {
+                eprintln!("overlay: hide failed: {e}");
+            }
+        }
+    });
 }
 
 fn gap_px(scale: f64) -> i32 {

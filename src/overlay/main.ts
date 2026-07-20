@@ -303,6 +303,22 @@ function init() {
 
   api.getConfig().then((c: Config) => applyTheme(c.theme));
   listen<Config>("config://changed", (e) => applyTheme(e.payload.theme));
-  api.subscribeHud(onHudEvent);
+  // Retry until the backend accepts the subscription: the webview can finish
+  // loading before .setup() has managed AppState, and a HUD that never
+  // subscribes is invisible forever (observed). Errors surface in the window
+  // title (debug channel — the overlay has no visible chrome of its own).
+  subscribeWithRetry(0);
 }
+
+function subscribeWithRetry(attempt: number) {
+  api.subscribeHud(onHudEvent).then(
+    () => { document.title = "DICTUM"; },
+    (err) => {
+      document.title = `DICTUM SUB-ERR ${String(err).slice(0, 60)}`;
+      if (attempt < 20) setTimeout(() => subscribeWithRetry(attempt + 1), 250);
+    },
+  );
+}
+
+window.addEventListener("error", (e) => { document.title = `DICTUM JS-ERR ${e.message?.slice(0, 60)}`; });
 init();

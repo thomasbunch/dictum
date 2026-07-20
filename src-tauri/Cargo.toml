@@ -9,6 +9,12 @@ edition = "2021"
 name = "dictum_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Embed dist/ and serve via the custom protocol. Without this a plain
+# `cargo build` produces a dev-mode exe that dials the Vite dev server.
+default = ["custom-protocol"]
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
 
