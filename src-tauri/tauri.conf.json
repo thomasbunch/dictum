@@ -1,0 +1,68 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Dictum",
+  "version": "0.1.0",
+  "identifier": "com.dictum.desktop",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:1420",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "overlay",
+        "url": "overlay.html",
+        "title": "DICTUM",
+        "visible": false,
+        "transparent": true,
+        "decorations": false,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "focus": false,
+        "focusable": false,
+        "resizable": false,
+        "width": 320,
+        "height": 64
+      },
+      {
+        "label": "settings",
+        "url": "settings.html",
+        "title": "DICTUM",
+        "visible": false,
+        "resizable": false,
+        "width": 560,
+        "height": 720
+      },
+      {
+        "label": "history",
+        "url": "history.html",
+        "title": "DICTUM — HISTORY",
+        "visible": false,
+        "resizable": true,
+        "width": 560,
+        "height": 480
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "icon": ["icons/icon.ico"],
+    "resources": ["resources/*"],
+    "windows": {
+      "webviewInstallMode": {
+        "type": "offlineInstaller",
+        "silent": true
+      },
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

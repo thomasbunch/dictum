@@ -1,0 +1,61 @@
+[package]
+name = "dictum"
+version = "0.1.0"
+description = "Local, CPU-only, push-to-talk dictation for Windows"
+license = "Apache-2.0"
+edition = "2021"
+
+[lib]
+name = "dictum_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.6.3", features = [] }
+
+[dependencies]
+tauri = { version = "2.11.5", features = ["tray-icon"] }
+tauri-plugin-global-shortcut = "2.3.2"
+tauri-plugin-single-instance = "2.4.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+
+# ASR + VAD (official k2-fsa crate; static prebuilt libs, needs crt-static)
+sherpa-onnx = "1.13.4"
+
+# Audio
+cpal = "0.18.1"
+rubato = "0.16.2"
+rtrb = "0.3.4"
+rodio = "0.22.2"
+hound = "3.5.1"
+
+# Injection + system
+clipboard-win = "5.4.1"
+windows = { version = "0.62.2", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_Threading",
+  "Win32_Security",
+  "Win32_System_RemoteDesktop",
+  "Win32_System_Power",
+] }
+windows-registry = "0.6"
+
+# Storage + config
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+dirs = "6.0.0"
+
+# Model download (the app's only network code) + verification
+ureq = "2"
+sha2 = "0.10"
+tar = "0.4"
+bzip2 = "0.4"
+
+# Replacements
+regex = "1"
+
+[profile.release]
+lto = "thin"
+strip = true
