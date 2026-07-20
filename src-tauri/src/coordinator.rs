@@ -282,20 +282,28 @@ impl Coordinator {
             }
             InjectOutcome::FocusChanged => {
                 // Hold the text; PasteLast re-injects into the now-focused window.
+                // inject() already put it on the clipboard — surface that on the
+                // HUD (no-silent-failure): toast has no UI in v1.
                 self.last_text = Some(text);
-                fx.toast("Focus changed — text held. Paste-last to insert.".into());
+                self.cue(fx, CueKind::Error);
+                self.set_state(
+                    fx,
+                    HudState::Error { msg: "TARGET CHANGED — COPIED TO CLIPBOARD".into() },
+                );
                 self.end_session(fx);
-                fx.hide_overlay();
-                self.timer = None;
-                self.arm_idle_unload(fx);
+                self.timer =
+                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
             }
             InjectOutcome::ClipboardManual(t) => {
                 self.last_text = Some(t);
-                fx.toast("Text is on the clipboard — paste manually.".into());
+                self.cue(fx, CueKind::Error);
+                self.set_state(
+                    fx,
+                    HudState::Error { msg: "COPIED TO CLIPBOARD — PASTE MANUALLY".into() },
+                );
                 self.end_session(fx);
-                fx.hide_overlay();
-                self.timer = None;
-                self.arm_idle_unload(fx);
+                self.timer =
+                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
             }
         }
     }
@@ -935,7 +943,10 @@ mod tests {
         c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
         c.handle(CoordMsg::DecodeDone { generation: g, text: "held text".into() }, &mut fx);
 
-        assert!(fx.calls.iter().any(|x| matches!(x, Call::Toast(_))));
+        assert!(fx
+            .huds()
+            .iter()
+            .any(|h| h.contains("TARGET CHANGED — COPIED TO CLIPBOARD")));
         assert_eq!(c.last_text.as_deref(), Some("held text"));
         assert!(matches!(c.state, State::Idle));
 

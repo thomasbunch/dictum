@@ -227,6 +227,19 @@ pub fn run() {
             // blocking channel send; the asr worker thread does the real load.
             if model::model_files().all_present() {
                 asr.ensure_loaded();
+            } else if let Some(archive) = model::find_dropped_archive() {
+                // Offline sideload (PLAN §4.4): a hand-dropped .tar.bz2 in the
+                // models dir installs on a background thread (600 MB extract),
+                // then warm-loads.
+                let asr2 = asr.clone();
+                let tx2 = tx.clone();
+                std::thread::spawn(move || match model::install_from_archive(&archive) {
+                    Ok(()) => asr2.ensure_loaded(),
+                    Err(e) => {
+                        eprintln!("sideload install failed: {e}");
+                        let _ = tx2.send(CoordMsg::ModelStatus(ModelStatus::Missing));
+                    }
+                });
             } else {
                 let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Missing));
             }
@@ -283,4 +296,76 @@ fn spawn_resume_detector(hotkey: Arc<Mutex<hotkey::HotkeyManager>>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod e2e {
+    //! Real-hardware pipeline test (M0 acceptance): downloads the model via the
+    //! app's own network path if absent (~628 MB, resumable), then decodes the
+    //! archive's bundled test WAV and measures RTF.
+    //! Run: cargo test --release -- --ignored e2e
+
+    #[test]
+    #[ignore]
+    fn model_download_and_decode() {
+        use crate::types::DownloadProgress;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::Instant;
+
+        let files = crate::model::model_files();
+        if !files.all_present() {
+            eprintln!("model absent — downloading via model::download()");
+            let failed = AtomicBool::new(false);
+            crate::model::download(|p| match &p {
+                DownloadProgress::Progress { pct, mb_done, mb_total } => {
+                    if pct % 5 == 0 {
+                        eprintln!("  {pct}% ({mb_done}/{mb_total} MB)");
+                    }
+                }
+                DownloadProgress::Verifying => eprintln!("  verifying SHA256…"),
+                DownloadProgress::Done => eprintln!("  done"),
+                DownloadProgress::Failed { error } => {
+                    eprintln!("  FAILED: {error}");
+                    failed.store(true, Ordering::SeqCst);
+                }
+            });
+            assert!(!failed.load(Ordering::SeqCst), "model download failed");
+        }
+        let files = crate::model::model_files();
+        assert!(files.all_present(), "model files missing after download");
+
+        // Same construction as asr.rs (kept in sync by the review suite).
+        let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
+        cfg.model_config.transducer = sherpa_onnx::OfflineTransducerModelConfig {
+            encoder: Some(files.encoder.to_string_lossy().into_owned()),
+            decoder: Some(files.decoder.to_string_lossy().into_owned()),
+            joiner: Some(files.joiner.to_string_lossy().into_owned()),
+        };
+        cfg.model_config.tokens = Some(files.tokens.to_string_lossy().into_owned());
+        cfg.model_config.provider = Some("cpu".into());
+        cfg.model_config.num_threads = 4;
+
+        let load_start = Instant::now();
+        let rec = sherpa_onnx::OfflineRecognizer::create(&cfg).expect("recognizer create");
+        eprintln!("model load: {:.1}s", load_start.elapsed().as_secs_f32());
+
+        let wav = crate::model::model_dir().join("test_wavs").join("0.wav");
+        assert!(wav.exists(), "bundled test wav missing: {}", wav.display());
+        let wave =
+            sherpa_onnx::Wave::read(wav.to_string_lossy().as_ref()).expect("read test wav");
+        let audio_secs = wave.num_samples() as f32 / wave.sample_rate() as f32;
+
+        let t = Instant::now();
+        let stream = rec.create_stream();
+        stream.accept_waveform(wave.sample_rate(), wave.samples());
+        rec.decode(&stream);
+        let text = stream.get_result().map(|r| r.text).unwrap_or_default();
+        let decode = t.elapsed().as_secs_f32();
+        let rtf = decode / audio_secs;
+
+        eprintln!("transcript: {text}");
+        eprintln!("audio {audio_secs:.2}s  decode {decode:.3}s  RTF {rtf:.4}");
+        assert!(!text.trim().is_empty(), "empty transcript from test wav");
+        assert!(rtf < 1.0, "RTF {rtf} ≥ 1.0 — misses the latency budget");
+    }
 }

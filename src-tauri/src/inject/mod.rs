@@ -17,6 +17,8 @@ pub fn inject(text: &str, target_hwnd: isize, cfg: &Config) -> InjectOutcome {
     // (1) Foreground must still be the window we captured at hotkey-down.
     let foreground = unsafe { GetForegroundWindow() };
     if foreground.0 as isize != target_hwnd {
+        // Text still reaches the user: on the clipboard + held for PasteLast.
+        let _ = clipboard::write_excluded(text);
         return InjectOutcome::FocusChanged;
     }
 

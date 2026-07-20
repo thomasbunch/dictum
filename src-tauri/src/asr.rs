@@ -17,6 +17,7 @@ enum AsrCmd {
 
 /// Handle held by the coordinator. Every method is fire-and-forget; replies
 /// arrive as `CoordMsg::DecodeDone/DecodeFailed/ModelStatus`.
+#[derive(Clone)]
 pub struct AsrEngine {
     tx: Sender<AsrCmd>,
 }
