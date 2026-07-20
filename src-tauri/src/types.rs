@@ -103,7 +103,10 @@ pub enum HudState {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Config {
-    /// Chord in tauri-plugin-global-shortcut syntax, e.g. "Ctrl+Super".
+    /// Chord in tauri-plugin-global-shortcut syntax, e.g. "Ctrl+Alt+Space".
+    /// The global-shortcut backend (global-hotkey) requires a non-modifier main
+    /// key, so modifier-only combos like "Ctrl+Super" are NOT registerable —
+    /// bare-modifier PTT is deferred to the win-hotkeys backend (PLAN §121, v1.1).
     pub hotkey: String,
     pub hotkey_mode: HotkeyMode,
     /// None = system default input device.
@@ -124,7 +127,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            hotkey: "Ctrl+Super".into(),
+            hotkey: "Ctrl+Alt+Space".into(),
             hotkey_mode: HotkeyMode::Both,
             input_device: None,
             audio_cues: true,

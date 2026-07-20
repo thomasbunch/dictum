@@ -1,0 +1,222 @@
+/* DICTUM Settings window — DESIGN.md §4. Zero hex literals: everything var(). */
+
+body {
+  background: var(--field);
+  width: 560px;
+}
+
+.ink2 { color: var(--ink2); }
+
+.wordmark {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+}
+
+/* Content lane */
+.cert {
+  background: var(--paper);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  margin: 16px;
+}
+
+.cert-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 16px;
+  border-bottom: 1px solid var(--hair);
+}
+.cert-header .wordmark { font-size: 16px; }
+.cert-header .mono { font-size: 13px; }
+
+/* Section */
+.sect { border-bottom: 1px solid var(--hair); }
+.sect:last-child { border-bottom: none; }
+
+.sect-title {
+  padding: 8px 16px;
+  border-bottom: 1px solid var(--hair);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.sect-title .label { color: var(--ink); }
+
+/* Row: label left, control right, 40px, hair2 divider */
+.row {
+  min-height: 40px;
+  padding: 0 16px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border-bottom: 1px solid var(--hair2);
+}
+.sect > .row:last-child { border-bottom: none; }
+
+.row-label { color: var(--ink2); white-space: nowrap; }
+.row-value {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.dim { color: var(--ink2); opacity: 0.55; }
+
+/* Note (body copy, sentence case) */
+.note {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 13px;
+  color: var(--ink2);
+  padding: 4px 16px 12px;
+}
+
+/* Ink text-button: 11px tracked caps, underline only on hover */
+.text-btn {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-decoration: none;
+}
+.text-btn:hover { text-decoration: underline; }
+.text-btn:disabled { color: var(--ink2); opacity: 0.55; cursor: default; text-decoration: none; }
+
+/* Hotkey chip */
+.chip {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 13px;
+  background: var(--register);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 4px 8px;
+  cursor: pointer;
+  color: var(--ink);
+}
+
+/* Segmented control */
+.segmented {
+  display: flex;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  overflow: hidden;
+}
+.segmented button {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--ink2);
+  background: var(--paper);
+  border: none;
+  border-left: 1px solid var(--hair);
+  padding: 6px 10px;
+  cursor: pointer;
+}
+.segmented button:first-child { border-left: none; }
+.segmented button.on { background: var(--register); color: var(--ink); }
+
+/* Native select, flat */
+select.flat {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--register);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 4px 6px;
+  appearance: auto;
+}
+
+/* Level lane */
+.level-lane { display: block; border: 1px solid var(--line); border-radius: 2px; }
+
+/* Toggle — pure CSS, 32x16 track, 12px square thumb */
+.toggle { display: inline-flex; cursor: pointer; }
+.toggle input { position: absolute; opacity: 0; width: 1px; height: 1px; }
+.toggle .track {
+  width: 32px; height: 16px;
+  background: var(--register);
+  border: 1px solid var(--line);
+  position: relative;
+  flex: none;
+}
+.toggle .thumb {
+  position: absolute; top: 1px; left: 1px;
+  width: 12px; height: 12px;
+  background: var(--ink);
+  transition: transform 120ms cubic-bezier(0.2, 0, 0, 1);
+}
+.toggle input:checked + .track { background: var(--ink); }
+.toggle input:checked + .track .thumb { background: var(--paper); transform: translateX(16px); }
+.toggle.disabled { cursor: default; opacity: 0.55; }
+
+/* Text input, flat */
+input.flat {
+  font-family: "IBM Plex Mono", Consolas, monospace;
+  font-size: 13px;
+  color: var(--ink);
+  background: var(--register);
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  padding: 4px 6px;
+}
+input.flat::placeholder { color: var(--ink2); }
+
+/* Vocabulary / Replacements lists */
+.list { display: flex; flex-direction: column; }
+.repl-table { display: flex; flex-direction: column; }
+.repl-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr 56px;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--hair2);
+}
+.repl-head {
+  display: grid;
+  grid-template-columns: 1fr 1fr 56px;
+  gap: 8px;
+  padding: 4px 16px 8px;
+}
+.badge { font-size: 9px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--ink2); }
+.btn-row { display: flex; gap: 16px; padding: 12px 16px; }
+
+/* Appearance swatches */
+.swatch-row { display: flex; gap: 12px; padding: 12px 16px; }
+.swatch-col { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.swatch {
+  width: 40px; height: 24px;
+  background: var(--field);
+  border: 1px solid var(--line);
+  cursor: pointer;
+  box-sizing: border-box;
+}
+.swatch.selected { box-shadow: inset 0 0 0 2px var(--ink); }
+.swatch-name {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 9px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink2);
+}
+
+/* SOURCE link: mono ink text-link, underline only on hover, no color change */
+a.row-value { text-decoration: none; cursor: pointer; }
+a.row-value:hover { text-decoration: underline; }

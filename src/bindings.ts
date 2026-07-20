@@ -79,6 +79,7 @@ export const api = {
   historyUndoDelete: () => invoke<void>("history_undo_delete"),
   historyMeta: () => invoke<string>("history_meta"),
   pasteLast: () => invoke<void>("paste_last"),
+  copyText: (text: string) => invoke<void>("copy_text", { text }),
   importReplacements: (text: string, format: "txt" | "json") =>
     invoke<number>("import_replacements", { text, format }),
   exportReplacements: (format: "txt" | "json") =>
