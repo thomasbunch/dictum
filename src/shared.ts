@@ -51,15 +51,44 @@ export function applyTheme(cfg: Config): void {
   root.dataset.field = cfg.theme;
 }
 
+/** get_config, retried until the backend has managed AppState. Every window's
+ * webview boots at startup — before .setup() finishes managing state (the same
+ * race the overlay's subscribeWithRetry handles). A hard await on the first
+ * stateful call would reject and blank the window forever, since main() never
+ * re-runs when the window is later shown. ~4s ceiling, then let the caller
+ * surface it. */
+async function getConfigWhenReady(): Promise<Config> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await api.getConfig();
+    } catch (e) {
+      if (attempt >= 40) throw e;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+  }
+}
+
 /** Fetches config, applies theme, and keeps it live via the config://changed event. */
 export async function initTheme(onChange?: (cfg: Config) => void): Promise<Config> {
-  const cfg = await api.getConfig();
+  const cfg = await getConfigWhenReady();
   applyTheme(cfg);
   await listen<Config>("config://changed", (e) => {
     applyTheme(e.payload);
     onChange?.(e.payload);
   });
   return cfg;
+}
+
+/** Last-resort visible error: a failed window shows a reason, not a blank page. */
+export function mountError(err: unknown): void {
+  const app = document.getElementById("app");
+  if (!app) return;
+  app.innerHTML = "";
+  app.append(
+    h("div", {
+      style: "font-family:'IBM Plex Mono',monospace;font-size:13px;color:var(--ink);padding:16px",
+    }, String(err)),
+  );
 }
 
 // ---------------------------------------------------------------------------

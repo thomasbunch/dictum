@@ -20,6 +20,7 @@ const WORD_RESTING_OPACITY = 0.92;
 type RGB = [number, number, number];
 interface Bar { amp: number; clip: boolean; bornAt: number }
 
+let pillEl: HTMLElement;
 let wordEl: HTMLElement;
 let subEl: HTMLElement;
 let canvas: HTMLCanvasElement;
@@ -34,6 +35,7 @@ let bars: Bar[] = []; // index 0 = newest (at pen head), increasing index = furt
 let totalBars = 0; // for elapsed = totalBars * MS_PER_BAR
 let paperPx = 0; // cumulative scroll distance, drives tick phase; frozen when not listeningLike
 let greyOutStart: number | null = null;
+let greyed = false; // grey-out settled: later re-renders (theme change, lane resize) must keep the trace at ink2@40%
 let loopRunning = false;
 let wordAnim: Animation | null = null;
 let stampAnim: Animation | null = null;
@@ -97,9 +99,10 @@ function setSub(text: string) {
 
 function setupCanvas() {
   const rect = canvas.getBoundingClientRect();
+  if (rect.width === 0 || rect.height === 0) return; // no-lane state / pre-layout: keep the last good geometry
   laneW = rect.width;
   laneH = rect.height;
-  headX = laneW * 0.75; // pen head fixed at 75% of lane width
+  headX = Math.round(laneW * 0.75); // pen head fixed at 75% of lane width; rounded so bars land on whole px (crisp 2px/1px, §2.2)
   const dpr = window.devicePixelRatio || 1;
   canvas.width = Math.round(laneW * dpr);
   canvas.height = Math.round(laneH * dpr);
@@ -136,8 +139,8 @@ function drawBars(now: number) {
       half = maxHalf; // clipped bars stay oxide, full lane height, forever
     } else {
       half = Math.min(maxHalf, bar.amp * maxHalf);
-      if (greyOutStart !== null) {
-        const t = Math.min(1, (now - greyOutStart) / GREYOUT_MS);
+      if (greyOutStart !== null || greyed) {
+        const t = greyed ? 1 : Math.min(1, (now - greyOutStart!) / GREYOUT_MS);
         color = lerpColor(palette.ink, 0.88, palette.ink2, 0.4, t);
       } else {
         const age = now - bar.bornAt;
@@ -166,6 +169,7 @@ function resetLane() {
   paperPx = 0;
   totalBars = 0;
   greyOutStart = null;
+  greyed = false;
 }
 // Force any in-flight ink-dry to its resting state and paint one static frame
 // (Transcribing/Injected/idle-error: "nothing animates" per DESIGN §7 idle audit).
@@ -173,6 +177,7 @@ function freezeBars() {
   const settled = performance.now() - DRY_MS - 1;
   for (const b of bars) b.bornAt = settled;
   greyOutStart = null;
+  greyed = false;
   render(performance.now());
 }
 function clearLaneStatic() {
@@ -189,7 +194,10 @@ function ensureLoop() {
 function tick(now: number) {
   render(now);
   const greyDone = greyOutStart !== null && now - greyOutStart >= GREYOUT_MS;
-  if (greyDone) greyOutStart = null;
+  if (greyDone) {
+    greyOutStart = null;
+    greyed = true; // persist: re-renders during the 400ms DISCARDED hold must not un-grey
+  }
   const dryInFlight = bars.some((b) => now - b.bornAt < DRY_MS);
   const shouldContinue = listeningLike || greyOutStart !== null || dryInFlight;
   if (shouldContinue) requestAnimationFrame(tick);
@@ -226,6 +234,7 @@ function onState(next: HudState) {
   if (nowHidden !== wasHidden) fadeBody(!nowHidden);
 
   listeningLike = next.k === "listening" || next.k === "confirm_discard";
+  pillEl.classList.toggle("no-lane", next.k === "error"); // error: hairline + lane hidden, the word takes the full row (DESIGN §2.1)
 
   switch (next.k) {
     case "hidden":
@@ -256,6 +265,7 @@ function onState(next: HudState) {
       break;
     case "cancelled":
       greyOutStart = performance.now();
+      greyed = false;
       setWord("DISCARDED");
       setSub("");
       ensureLoop();
@@ -293,19 +303,25 @@ function init() {
   const host = document.getElementById("hud")!;
   host.innerHTML = `
     <div class="pill">
-      <div class="status">
-        <div class="word label"></div>
-        <div class="sub mono"></div>
-      </div>
+      <div class="word label"></div>
+      <div class="sub mono"></div>
       <div class="hair"></div>
       <canvas class="lane"></canvas>
     </div>`;
+  pillEl = host.querySelector(".pill")!;
   wordEl = host.querySelector(".word")!;
   subEl = host.querySelector(".sub")!;
   canvas = host.querySelector(".lane")!;
   ctx = canvas.getContext("2d")!;
   setupCanvas();
   readPalette();
+  // Long-word states shrink the lane (DESIGN §2.1): re-measure the backing
+  // store on any lane resize and repaint. The bars array survives the resize;
+  // an animation frame in flight repaints anyway.
+  new ResizeObserver(() => {
+    setupCanvas();
+    if (!loopRunning) render(performance.now());
+  }).observe(canvas);
 
   api.getConfig().then((c: Config) => applyTheme(c.theme));
   listen<Config>("config://changed", (e) => applyTheme(e.payload.theme));

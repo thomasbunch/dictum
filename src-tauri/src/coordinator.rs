@@ -18,6 +18,9 @@ const CONFIRM_WINDOW_MS: u64 = 2000; // ConfirmDiscard revert window
 const HUD_INJECTED_MS: u64 = 600;
 const HUD_CANCELLED_MS: u64 = 400;
 const HUD_ERROR_MS: u64 = 4000;
+// §2.4 hide fade is 160ms in the webview; hide the native window a hair later
+// so the fade is never clipped.
+const HUD_FADE_MS: u64 = 200;
 // ponytail: fixed idle-unload delay; make it a config knob only if RAM tuning demands.
 const IDLE_UNLOAD_MS: u64 = 30_000;
 
@@ -72,6 +75,9 @@ enum State {
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Timer {
     HideHud,
+    /// Second phase of HideHud: the webview got Hidden and is fading (§2.4);
+    /// now actually hide the native window.
+    HideWindow,
     RevertConfirm,
     UnloadIdle,
 }
@@ -300,7 +306,7 @@ impl Coordinator {
                 self.cue(fx, CueKind::Error);
                 self.set_state(
                     fx,
-                    HudState::Error { msg: "TARGET ELEVATED — COPIED TO CLIPBOARD".into() },
+                    HudState::Error { msg: "TARGET ELEVATED · COPIED".into() },
                 );
                 self.end_session(fx);
                 self.timer =
@@ -558,6 +564,13 @@ impl Coordinator {
         let Some((_, t)) = self.timer.take() else { return };
         match t {
             Timer::HideHud => {
+                // Broadcast Hidden so the webview plays the 160ms hide fade
+                // (§2.4) and knows to fade back in on the next session.
+                self.set_state(fx, HudState::Hidden);
+                self.timer =
+                    Some((fx.now() + Duration::from_millis(HUD_FADE_MS), Timer::HideWindow));
+            }
+            Timer::HideWindow => {
                 fx.hide_overlay();
                 self.arm_idle_unload(fx);
             }
@@ -813,7 +826,11 @@ mod tests {
         assert!(fx.has(&Call::Tray(false)));
         assert!(fx.has(&Call::EscArmed(false)));
 
-        // HUD-hide timer fires -> overlay hidden.
+        // HUD-hide timer fires -> Hidden broadcast (webview fades, §2.4), then
+        // the second phase actually hides the native window.
+        c.fire_timer(&mut fx);
+        assert_eq!(fx.huds().last().unwrap(), "hidden");
+        assert!(!fx.has(&Call::HideOverlay));
         c.fire_timer(&mut fx);
         assert!(fx.has(&Call::HideOverlay));
     }
@@ -1049,7 +1066,9 @@ mod tests {
         c.handle(CoordMsg::DecodeDone { generation: g, text: "there".into() }, &mut fx);
         assert!(fx.has(&Call::Inject("hi there".into())));
 
-        // HideHud fires -> overlay hides AND the idle-unload timer arms.
+        // HideHud fires (fade), then HideWindow -> overlay hides AND the
+        // idle-unload timer arms.
+        c.fire_timer(&mut fx);
         c.fire_timer(&mut fx);
         assert!(fx.has(&Call::HideOverlay));
         assert!(!fx.has(&Call::UnloadModel)); // not yet — only armed
@@ -1070,7 +1089,8 @@ mod tests {
         c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
         c.handle(CoordMsg::DecodeDone { generation: g, text: "x".into() }, &mut fx);
 
-        c.fire_timer(&mut fx); // HideHud -> hide, but no idle-unload armed
+        c.fire_timer(&mut fx); // HideHud -> fade
+        c.fire_timer(&mut fx); // HideWindow -> hide, but no idle-unload armed
         assert!(fx.has(&Call::HideOverlay));
         c.fire_timer(&mut fx); // nothing armed
         assert!(!fx.has(&Call::UnloadModel));
@@ -1169,7 +1189,7 @@ mod tests {
         c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
         c.handle(CoordMsg::DecodeDone { generation: g, text: "x".into() }, &mut fx);
 
-        assert_eq!(fx.huds().last().unwrap(), "error:TARGET ELEVATED — COPIED TO CLIPBOARD");
+        assert_eq!(fx.huds().last().unwrap(), "error:TARGET ELEVATED · COPIED");
         assert!(fx.has(&Call::Cue(CueKind::Error)));
     }
 

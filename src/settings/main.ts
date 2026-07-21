@@ -9,7 +9,7 @@ import {
   type DownloadProgress,
   type LevelBar,
 } from "../bindings";
-import { h, initTheme, applyTheme } from "../shared";
+import { h, initTheme, applyTheme, mountError } from "../shared";
 
 let config: Config;
 let levelLane: ReturnType<typeof makeLevelLane> | undefined;
@@ -554,4 +554,4 @@ async function main() {
   });
 }
 
-void main();
+main().catch(mountError);

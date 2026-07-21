@@ -25,7 +25,7 @@
         "focusable": false,
         "resizable": false,
         "width": 320,
-        "height": 64
+        "height": 32
       },
       {
         "label": "settings",

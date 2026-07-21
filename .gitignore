@@ -6,3 +6,4 @@ src-tauri/gen/
 .DS_Store
 NEEDS.md
 RESEARCH.json
+docs/

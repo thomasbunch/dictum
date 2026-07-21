@@ -1,7 +1,7 @@
 // DICTUM History window — DESIGN.md §5.
 import { invoke } from "@tauri-apps/api/core";
 import { api, type HistoryRecord } from "../bindings";
-import { h, initTheme, debounce } from "../shared";
+import { h, initTheme, debounce, mountError } from "../shared";
 
 let records: HistoryRecord[] = [];
 let footerTimer: ReturnType<typeof setTimeout> | undefined;
@@ -139,4 +139,4 @@ async function main() {
   await reload(null);
 }
 
-void main();
+main().catch(mountError);

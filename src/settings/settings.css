@@ -1,8 +1,9 @@
 /* DICTUM Settings window — DESIGN.md §4. Zero hex literals: everything var(). */
 
+/* Width comes from the fixed 560px window; a hard-coded body width fights the
+   vertical scrollbar and spawns a horizontal one. */
 body {
   background: var(--field);
-  width: 560px;
 }
 
 .ink2 { color: var(--ink2); }
@@ -140,6 +141,7 @@ select.flat {
   border-radius: 2px;
   padding: 4px 6px;
   appearance: auto;
+  max-width: 280px; /* long device names clip instead of overflowing the cert */
 }
 
 /* Level lane */

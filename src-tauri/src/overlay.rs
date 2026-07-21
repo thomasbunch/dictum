@@ -31,10 +31,16 @@ pub fn position_and_show(app: &AppHandle) {
     let handle = app.clone();
     let r = app.run_on_main_thread(move || {
         let Some(w) = handle.get_webview_window("overlay") else { return };
-        match (w.cursor_position(), w.outer_size()) {
-            (Ok(cursor), Ok(win)) => match w.monitor_from_point(cursor.x, cursor.y) {
+        match (w.cursor_position(), w.outer_size(), w.scale_factor()) {
+            (Ok(cursor), Ok(win), Ok(cur_scale)) => match w.monitor_from_point(cursor.x, cursor.y) {
                 Ok(Some(mon)) => {
                     let scale = mon.scale_factor();
+                    // outer_size() is physical px on the monitor the window is
+                    // currently on. After set_position lands it on the target
+                    // monitor, WM_DPICHANGED rescales it — so place using the
+                    // size it WILL have there, not the stale one (mixed-DPI).
+                    let win_w = rescale(win.width, cur_scale, scale);
+                    let win_h = rescale(win.height, cur_scale, scale);
                     // Prefer the real work area (excludes taskbar, honors auto-hide
                     // and side-docked taskbars); fall back to full monitor + taskbar
                     // allowance if the Win32 query fails.
@@ -48,14 +54,19 @@ pub fn position_and_show(app: &AppHandle) {
                         }
                     };
                     let (x, y) =
-                        bottom_center(rx, ry, rw, rh, win.width, win.height, gap_px(gap_logical, scale));
+                        bottom_center(rx, ry, rw, rh, win_w, win_h, gap_px(gap_logical, scale));
                     if let Err(e) = w.set_position(PhysicalPosition::new(x, y)) {
                         eprintln!("overlay: set_position failed: {e}");
                     }
                 }
                 other => eprintln!("overlay: monitor_from_point failed: {other:?}"),
             },
-            (c, s) => eprintln!("overlay: cursor/size query failed: {:?} {:?}", c.err(), s.err()),
+            (c, s, f) => eprintln!(
+                "overlay: cursor/size/scale query failed: {:?} {:?} {:?}",
+                c.err(),
+                s.err(),
+                f.err()
+            ),
         }
         if let Err(e) = w.show() {
             eprintln!("overlay: show failed: {e}");
@@ -79,6 +90,13 @@ pub fn hide(app: &AppHandle) {
 
 fn gap_px(logical: f64, scale: f64) -> i32 {
     (logical * scale).round() as i32
+}
+
+/// Rescale a physical size from the window's current monitor scale to the
+/// target monitor's — the size the 320x32-logical strip will have after
+/// WM_DPICHANGED. Extracted for testing.
+fn rescale(px: u32, from_scale: f64, to_scale: f64) -> u32 {
+    (px as f64 / from_scale * to_scale).round() as u32
 }
 
 /// Real per-monitor work-area rect (physical px) for the monitor under `(x, y)`,
@@ -117,18 +135,31 @@ mod tests {
 
     #[test]
     fn centers_and_lifts_off_bottom() {
-        // 1920x1080 primary, 320x64 pill, 96px gap.
-        let (x, y) = bottom_center(0, 0, 1920, 1080, 320, 64, 96);
+        // 1920x1080 primary, 320x32 strip, 96px gap.
+        let (x, y) = bottom_center(0, 0, 1920, 1080, 320, 32, 96);
         assert_eq!(x, (1920 - 320) / 2);
-        assert_eq!(y, 1080 - 64 - 96);
+        assert_eq!(y, 1080 - 32 - 96);
     }
 
     #[test]
     fn honors_monitor_origin_on_second_display() {
         // second monitor to the right at x=1920.
-        let (x, y) = bottom_center(1920, 0, 1280, 720, 320, 64, 96);
+        let (x, y) = bottom_center(1920, 0, 1280, 720, 320, 32, 96);
         assert_eq!(x, 1920 + (1280 - 320) / 2);
-        assert_eq!(y, 720 - 64 - 96);
+        assert_eq!(y, 720 - 32 - 96);
+    }
+
+    #[test]
+    fn window_size_rescales_to_target_monitor() {
+        // Mixed DPI: strip last shown on a 100% monitor (320x32 physical),
+        // target monitor at 150% -> place as 480x48.
+        assert_eq!(rescale(320, 1.0, 1.5), 480);
+        assert_eq!(rescale(32, 1.0, 1.5), 48);
+        // And back down.
+        assert_eq!(rescale(480, 1.5, 1.0), 320);
+        assert_eq!(rescale(48, 1.5, 1.0), 32);
+        // Uniform DPI: unchanged.
+        assert_eq!(rescale(320, 1.25, 1.25), 320);
     }
 
     #[test]
