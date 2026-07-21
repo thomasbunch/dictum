@@ -6,9 +6,9 @@ Hold your hotkey anywhere, speak, release — transcribed text appears at your c
 
 ## Status
 
-Pre-release. Internal codename: Dictum (public name pending rename).
+Pre-release (v0.2.x). Internal codename: Dictum (public name pending rename).
 
-Currently in development. Milestone M0 (proof of concept on real hardware) and M1 (walking skeleton) underway.
+Working end to end on real hardware: full dictation pipeline, injection fallback chain, history, replacements, spoken `@file` mentions (FILE TAG), and English + 25-language multilingual models.
 
 ## Quick Start
 
@@ -16,8 +16,8 @@ Currently in development. Milestone M0 (proof of concept on real hardware) and M
 
 1. Download the latest installer from [GitHub Releases](https://github.com/thomasbunch/dictum/releases)
 2. Run `Dictum-Setup.exe` (per-user, no admin required)
-3. On first launch, the app downloads the English ASR model (~630 MB) and stores it in `%APPDATA%\Dictum\models\`
-4. Press and hold **Ctrl+Win** to start dictating; release to transcribe and paste
+3. On first launch, the app downloads the English ASR model (~630 MB) and stores it in `%APPDATA%\Dictum\models\`. A 25-language model (incl. Russian, German, French, Spanish — automatic language detection) is an optional second download under SETUP → MODEL.
+4. Press and hold **Ctrl+Alt+D** to start dictating; release to transcribe and paste
 
 ### Offline Sideload (Air-Gapped / Locked-Down Networks)
 
@@ -25,13 +25,14 @@ If your machine has no internet access or network restrictions:
 
 1. On a machine with internet, download the model archive:
    - English (Parakeet-TDT 0.6B v2, int8): [sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2)
+   - Multilingual, 25 languages (Parakeet-TDT 0.6B v3, int8): [sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2](https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2)
 2. Transfer the archive to your target machine via USB or internal file transfer
 3. Extract into `%APPDATA%\Dictum\models\` (create the folder if it doesn't exist)
 4. Launch Dictum; it detects the model and skips the download step
 
 ### Hotkey
 
-**Default:** Ctrl+Win (hold to dictate, release to paste)
+**Default:** Ctrl+Alt+D (hold to dictate, release to paste)
 
 - **Hold mode:** Press and hold to record; release immediately after speaking
 - **Toggle mode:** Tap to start, tap again to stop (configurable in Settings)
@@ -87,7 +88,8 @@ Signed binaries (via Azure Trusted Signing) are planned for wider release and en
 
 ## Features
 
-- **Offline ASR:** Parakeet-TDT 0.6B v2 (6.05% WER, ~4× faster than Whisper Small)
+- **Offline ASR:** Parakeet-TDT 0.6B v2 (6.05% WER, ~4× faster than Whisper Small); optional v3 model adds 25 European languages (incl. Russian and Ukrainian) with automatic language detection
+- **FILE TAG — spoken `@file` mentions:** dictating into Claude Code, Cursor, or any agent, "look at coordinator dot rs" prints `look @src-tauri/src/coordinator.rs`. Deterministic (no LLM), scoped to the project your focused window is in, rewrites only unambiguous matches
 - **Latency:** Key-release to text-in-app **< 1000 ms** for utterances ≤ 15 seconds on target hardware (i5/i7 corporate class)
 - **No configuration:** Works out of the box; sensible defaults for all settings
 - **Multi-app support:** Tested with Word, Excel, Chrome, Firefox, Teams, Slack, Windows Terminal, VS Code, and more
@@ -102,7 +104,7 @@ Signed binaries (via Azure Trusted Signing) are planned for wider release and en
 - **Hardware:** 
   - CPU: x86-64 (i5/i7 class or better)
   - RAM: 2 GB minimum (4+ GB recommended; model footprint ~1.2–2 GB)
-  - Audio:** Working microphone (headset, USB, or built-in)
+  - Audio: Working microphone (headset, USB, or built-in)
 - **Network:** None required for dictation; internet needed only for first-run model download
 
 ## License
@@ -131,6 +133,6 @@ See [THIRD-PARTY-LICENSES.md](THIRD-PARTY-LICENSES.md) for the complete license 
 
 ## Feedback
 
-Found a bug? Noticed inaccurate transcription for your accent or domain? Open an issue on [GitHub](https://github.com/username/dictum/issues).
+Found a bug? Noticed inaccurate transcription for your accent or domain? Open an issue on [GitHub](https://github.com/thomasbunch/dictum/issues).
 
 Feature requests are welcome. Note that Dictum is a personal tool first; enterprise features live in optional documentation, not the critical path.
