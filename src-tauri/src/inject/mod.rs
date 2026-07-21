@@ -6,7 +6,7 @@ mod integrity;
 mod overrides;
 mod sendinput;
 
-use crate::types::{Config, InjectBackend, InjectOutcome, PasteShortcut};
+use crate::types::{Config, InjectBackend, InjectMethod, InjectOutcome, PasteShortcut};
 use std::time::Duration;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow;
@@ -48,13 +48,15 @@ pub fn inject(text: &str, target_hwnd: isize, cfg: &Config) -> InjectOutcome {
 
     // (5)/(6) run the chosen backend.
     let chars = text.chars().count() as u32;
-    let ok = match r.backend {
-        InjectBackend::Clipboard => inject_clipboard(text, r.paste),
-        InjectBackend::SendInputUnicode => sendinput::send_unicode_string(text, r.chunk_delay_ms),
+    let (ok, method) = match r.backend {
+        InjectBackend::Clipboard => (inject_clipboard(text, r.paste), InjectMethod::Pasted),
+        InjectBackend::SendInputUnicode => {
+            (sendinput::send_unicode_string(text, r.chunk_delay_ms), InjectMethod::Typed)
+        }
     };
 
     if ok {
-        InjectOutcome::Injected { chars }
+        InjectOutcome::Injected { chars, method }
     } else {
         // (7) Terminal state: leave the text on the clipboard for a manual paste —
         // unless even that write fails, which we must report honestly.

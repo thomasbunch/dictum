@@ -24,7 +24,7 @@ use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
 use crate::audio::Cue;
 use crate::coordinator::{CueKind, Effects};
 use crate::tray::TrayState;
-use crate::types::{Config, CoordMsg, HudEvent, InjectOutcome, ModelStatus};
+use crate::types::{Config, CoordMsg, HudEvent, HudState, InjectOutcome, ModelStatus, ModelStatusDto, TakeMeta};
 
 /// Fan-out of HUD events to every subscribed webview (overlay + Settings level
 /// lane). Dead channels are dropped on the next broadcast.
@@ -50,6 +50,9 @@ pub struct AppState {
     /// Shared with the coordinator's `Effects` (esc-arm) and the resume detector
     /// (re-arm); `set_config` rebinds through it.
     pub hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
+    /// Last announced model status (SETUP model card reads it at boot; live
+    /// updates arrive on the `model://status` event).
+    pub model_status: Arc<Mutex<ModelStatusDto>>,
 }
 
 /// The concrete `Effects` the coordinator calls out through. Keeps coordinator.rs
@@ -64,6 +67,10 @@ struct RealEffects {
     history: Arc<Mutex<history::History>>,
     config: Arc<Mutex<Config>>,
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
+    model_status: Arc<Mutex<ModelStatusDto>>,
+    /// Last click-through value pushed to the overlay (avoid a main-thread hop
+    /// per HUD state when nothing changed).
+    overlay_click_through: bool,
 }
 
 /// Coordinator's earcon enum -> the audio module's `Cue`.
@@ -106,6 +113,16 @@ impl Effects for RealEffects {
         foreground_hwnd()
     }
     fn hud(&mut self, ev: HudEvent) {
+        // DESIGN §5.6: the HUD is click-through EXCEPT during confirm_discard
+        // and error. Toggle only on an actual change (main-thread hop).
+        if let HudEvent::State { s } = &ev {
+            let click_through =
+                !matches!(s, HudState::ConfirmDiscard | HudState::Error { .. });
+            if click_through != self.overlay_click_through {
+                self.overlay_click_through = click_through;
+                crate::overlay::set_click_through(&self.app, click_through);
+            }
+        }
         // Visibility is driven by the coordinator via show_overlay/hide_overlay;
         // here we only fan the event out to subscribed webviews.
         self.hud.broadcast(&ev);
@@ -134,7 +151,7 @@ impl Effects for RealEffects {
     fn foreground_exe(&mut self, hwnd: isize) -> Option<String> {
         crate::inject::exe_for_hwnd(hwnd)
     }
-    fn append_history(&mut self, raw: String, text: String, exe: Option<String>) {
+    fn append_history(&mut self, raw: String, text: String, exe: Option<String>, meta: TakeMeta) {
         // append() no-ops internally when keep_transcripts is off / retention is
         // KeepNothing. exe is resolved from the target window (PLAN §9).
         let cfg = self.config.lock().unwrap().clone();
@@ -142,7 +159,9 @@ impl Effects for RealEffects {
             .history
             .lock()
             .unwrap()
-            .append(&raw, &text, exe.as_deref(), &cfg);
+            .append(&raw, &text, exe.as_deref(), &meta, &cfg);
+        // The main window (if open) prints the new line on arrival (§5.2).
+        let _ = self.app.emit("history://changed", ());
     }
     fn apply_replacements(&mut self, raw: &str) -> String {
         let cfg = self.config.lock().unwrap().clone();
@@ -150,6 +169,14 @@ impl Effects for RealEffects {
     }
     fn set_esc_armed(&mut self, armed: bool) {
         let _ = self.hotkey.lock().unwrap().arm_esc(armed);
+    }
+    fn announce_model_status(&mut self, st: &ModelStatus) {
+        let dto = ModelStatusDto::from(st);
+        *self.model_status.lock().unwrap() = dto.clone();
+        let _ = self.app.emit("model://status", dto);
+    }
+    fn set_paste_available(&mut self, on: bool) {
+        self.tray.set_paste_enabled(on);
     }
     fn now(&mut self) -> Instant {
         Instant::now()
@@ -160,7 +187,8 @@ pub fn run() {
     tauri::Builder::default()
         // single-instance MUST be registered first (RESEARCH tauri §7).
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            if let Some(w) = app.get_webview_window("settings") {
+            if let Some(w) = app.get_webview_window("main") {
+                let _ = w.unminimize();
                 let _ = w.show();
                 let _ = w.set_focus();
             }
@@ -176,8 +204,10 @@ pub fn run() {
             commands::history_list,
             commands::history_delete,
             commands::history_undo_delete,
-            commands::history_meta,
+            commands::history_count,
             commands::paste_last,
+            commands::toggle_dictation,
+            commands::get_model_status,
             commands::import_replacements,
             commands::export_replacements,
             commands::subscribe_hud,
@@ -186,6 +216,17 @@ pub fn run() {
         .setup(|app| {
             let handle = app.handle().clone();
             overlay::setup(&handle);
+
+            // Dictum is a tray app: closing the main window hides it, never quits.
+            if let Some(main) = app.get_webview_window("main") {
+                let mw = main.clone();
+                main.on_window_event(move |e| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = e {
+                        api.prevent_close();
+                        let _ = mw.hide();
+                    }
+                });
+            }
 
             let config = Arc::new(Mutex::new(config::load()));
             let init_cfg = config.lock().unwrap().clone();
@@ -221,6 +262,11 @@ pub fn run() {
                 }
             };
             let hotkey = Arc::new(Mutex::new(hotkey_mgr));
+            let model_status = Arc::new(Mutex::new(if model::model_files().all_present() {
+                ModelStatusDto::Loading { pct: 0 }
+            } else {
+                ModelStatusDto::Missing
+            }));
 
             app.manage(AppState {
                 config: config.clone(),
@@ -228,6 +274,7 @@ pub fn run() {
                 hud: hud.clone(),
                 history: history.clone(),
                 hotkey: hotkey.clone(),
+                model_status: model_status.clone(),
             });
 
             // Warm the model unless it's missing (missing -> first hotkey shows
@@ -262,6 +309,8 @@ pub fn run() {
                 history,
                 config,
                 hotkey: hotkey.clone(),
+                model_status,
+                overlay_click_through: true, // overlay::setup made it click-through
             };
             std::thread::spawn(move || {
                 coordinator::Coordinator::run(rx, &mut fx, init_cfg);

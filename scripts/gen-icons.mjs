@@ -1,6 +1,7 @@
-// Zero-dep icon generator (DESIGN.md §3.1). Hand-rolled PNG (node:zlib) + ICO.
-// Glyph = miniature chart-recorder lane: horizontal baseline, small trace blip,
-// two ticks. Flat ink, no AA (instrument look). Run: node scripts/gen-icons.mjs
+// Zero-dep icon generator (DESIGN.md §5.7). Hand-rolled PNG (node:zlib) + ICO.
+// Glyph = punched-tape cartridge: 1px-stroke outline with a dashed center line
+// (idle), solid center bar (recording), diagonal strike (mic error). Flat ink,
+// no AA (instrument look). Run: node scripts/gen-icons.mjs
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -10,10 +11,10 @@ const ROOT = path.resolve(fileURLToPath(import.meta.url), "..", "..", "src-tauri
 const RES = path.join(ROOT, "resources");
 const ICONS = path.join(ROOT, "icons");
 
-// --- colors (DESIGN §6) ---
-const INK = [28, 33, 26, 255];        // #1C211A  dark glyph (for light taskbar)
-const LIGHT = [230, 225, 231, 255];   // #E6E1E7  light glyph (for dark taskbar)
-const PAPER = [227, 232, 217, 255];   // #E3E8D9  LEDGER paper (app icon field)
+// --- colors (DESIGN §1, BONE/OBSIDIAN ink) ---
+const INK = [33, 31, 26, 255];        // #211F1A  dark glyph (for light taskbar)
+const LIGHT = [234, 231, 224, 255];   // #EAE7E0  light glyph (for dark taskbar)
+const FIELD = [233, 230, 223, 255];   // #E9E6DF  BONE field (app icon)
 
 // --- pixel buffer helpers ---
 const mkbuf = (W, H, bg = [0, 0, 0, 0]) => {
@@ -44,35 +45,30 @@ function line(b, W, H, x0, y0, x1, y1, t, c) {
   }
 }
 
-// The chart-recorder glyph. solidBlip => filled (heavier ink) recording state;
-// strike => 1px diagonal through the blip (mic error).
-function drawGlyph(b, W, H, col, { solidBlip = false, strike = false } = {}) {
+// The punched-tape cartridge glyph (DESIGN §5.7 / mockup §07).
+// solidBar => recording (solid 3t center bar); strike => diagonal through it.
+function drawGlyph(b, W, H, col, { solidBar = false, strike = false } = {}) {
   const t = Math.max(1, Math.round(W / 16));
-  const base = Math.round(H * 0.58);
-  const x0 = Math.round(W * 0.14), x1 = Math.round(W * 0.86);
-  // baseline
-  rect(b, W, H, x0, base, x1 - x0, t, col);
-  // two ticks hanging below the baseline
-  const tickH = Math.max(2, Math.round(H * 0.16));
-  for (const fx of [0.30, 0.68]) {
-    const tx = Math.round(W * fx);
-    rect(b, W, H, tx, base + t, t, tickH, col);
-  }
-  // trace blip: a small peak rising above the baseline near center
-  const bx0 = Math.round(W * 0.42), bxp = Math.round(W * 0.50), bx1 = Math.round(W * 0.58);
-  const peakY = base - Math.round(H * 0.22);
-  if (solidBlip) {
-    // filled peak: vertical spans from baseline up to the ^ envelope
-    for (let x = bx0; x <= bx1; x++) {
-      const frac = x <= bxp ? (x - bx0) / (bxp - bx0 || 1) : (bx1 - x) / (bx1 - bxp || 1);
-      const top = Math.round(base - frac * (base - peakY));
-      rect(b, W, H, x, top, t, base - top + t, col);
-    }
+  // Cartridge outline: full width minus a t margin, ~56% of the height, centered.
+  const x0 = t, w = W - 2 * t;
+  const h = Math.max(5 * t, Math.round(H * 0.56));
+  const y0 = Math.round((H - h) / 2);
+  rect(b, W, H, x0, y0, w, t, col);              // top
+  rect(b, W, H, x0, y0 + h - t, w, t, col);      // bottom
+  rect(b, W, H, x0, y0, t, h, col);              // left
+  rect(b, W, H, x0 + w - t, y0, t, h, col);      // right
+  const ix0 = x0 + 2 * t, iw = w - 4 * t;        // tape lane, inset 2t
+  if (solidBar) {
+    // Solid center bar, 3t tall.
+    rect(b, W, H, ix0, y0 + Math.round((h - 3 * t) / 2), iw, 3 * t, col);
   } else {
-    line(b, W, H, bx0, base, bxp, peakY, t, col);
-    line(b, W, H, bxp, peakY, bx1, base, t, col);
+    // Dashed center line: 2t on, 2t off, t tall.
+    const ly = y0 + Math.round((h - t) / 2);
+    for (let x = ix0; x < ix0 + iw; x += 4 * t) {
+      rect(b, W, H, x, ly, Math.min(2 * t, ix0 + iw - x), t, col);
+    }
   }
-  if (strike) line(b, W, H, bx0, peakY, bx1, base + tickH, Math.max(1, t), col);
+  if (strike) line(b, W, H, 0, Math.round(H * 0.85), W - 1, Math.round(H * 0.28), t, col);
 }
 
 // --- PNG encoder ---
@@ -127,9 +123,9 @@ function encodeIco(imgs) {
   return Buffer.concat([header, dir, ...imgs.map((i) => i.png)]);
 }
 
-// rounded-2px paper square for the app icon
+// rounded-2px field square for the app icon
 function paperSquare(W, H) {
-  const b = mkbuf(W, H, PAPER);
+  const b = mkbuf(W, H, FIELD);
   const r = 2;
   for (const [cx, cy, sx, sy] of [[0, 0, 1, 1], [W - 1, 0, -1, 1], [0, H - 1, 1, -1], [W - 1, H - 1, -1, -1]]) {
     for (let i = 0; i < r; i++) for (let j = 0; j < r; j++) {
@@ -143,7 +139,7 @@ fs.mkdirSync(RES, { recursive: true });
 fs.mkdirSync(ICONS, { recursive: true });
 
 // --- tray icons: 3 states x 2 themes, 16px transparent ---
-const states = { idle: {}, rec: { solidBlip: true }, err: { strike: true } };
+const states = { idle: {}, rec: { solidBar: true }, err: { strike: true } };
 for (const [name, opt] of Object.entries(states)) {
   for (const [theme, col] of [["light", LIGHT], ["dark", INK]]) {
     const b = mkbuf(16, 16);
@@ -156,10 +152,10 @@ for (const [name, opt] of Object.entries(states)) {
   }
 }
 
-// --- app icon: ink glyph on LEDGER paper, ICO {16,32,48,256} + 128 PNG ---
+// --- app icon: ink cartridge (recording bar, per thumbnail) on BONE field ---
 function appIcon(size) {
   const b = paperSquare(size, size);
-  drawGlyph(b, size, size, INK);
+  drawGlyph(b, size, size, INK, { solidBar: true });
   return encodePng(size, size, b);
 }
 const ico = encodeIco([16, 32, 48, 256].map((s) => ({ size: s, png: appIcon(s) })));

@@ -1,279 +1,220 @@
 /// <reference types="vite/client" />
-// DICTUM HUD overlay — one canvas painter + a state switch, no framework.
-// (the reference above pulls in ambient *.css side-effect import types; tsconfig.json has no global "types" entry for vite/client)
-// DESIGN.md §2 (geometry/lane, binding every px), §7 (motion), §1.2 (copy).
+// DICTUM HUD overlay — DESIGN.md §5.6 (binding, every px), §7 (motion), §6 (copy).
+// One canvas painter + a state switch, no framework.
+// (the reference above pulls in ambient *.css side-effect import types)
 import { listen } from "@tauri-apps/api/event";
 import { api, MS_PER_BAR } from "../bindings";
 import type { Config, HudEvent, HudState } from "../bindings";
-import "@fontsource/ibm-plex-sans/600.css"; // status word (label style)
-import "@fontsource/ibm-plex-mono/400.css"; // elapsed / char count / pct
+import "@fontsource/ibm-plex-sans/600.css"; // state label
+import "@fontsource/ibm-plex-mono/400.css"; // timer / % / hints
 
-const EASE = "cubic-bezier(0.2, 0, 0, 1)";
-const DRY_MS = 120; // pen ink-dry: oxide -> ink@88%
-const GREYOUT_MS = 140; // cancel trace grey-out: ink@88% -> ink2@40%
-const BAR_PITCH = 3; // 2px bar + 1px gap
-const BAR_W = 2;
-// DESIGN.md pins bars at ink@88% resting; it never pins a numeric resting
-// opacity for status-word ink-dry. Picked a subtle value; revise if design adds one.
-const WORD_RESTING_OPACITY = 0.92;
+// Waveform constants (§5.6): 140px window ≈ last 4.2s → 112 bars at 37.5ms.
+const LANE_W = 140;
+const LANE_H = 32;
+const PX_PER_BAR = LANE_W / (4200 / MS_PER_BAR); // 1.25px
+const MID_Y = 16;
+const AMP_PX = 15;
+const CLIP_TICK_W = 2.4;
+const CLIP_TICK_H = 5;
 
-type RGB = [number, number, number];
-interface Bar { amp: number; clip: boolean; bornAt: number }
+interface Bar { amp: number; clip: boolean; index: number }
 
-let pillEl: HTMLElement;
-let wordEl: HTMLElement;
-let subEl: HTMLElement;
-let canvas: HTMLCanvasElement;
+let contentEl: HTMLElement;
+let stateEl: HTMLElement;
+let laneEl: HTMLCanvasElement;
+let progressEl: HTMLElement;
+let fillEl: HTMLElement;
+let msgEl: HTMLElement;
+let rightEl: HTMLElement;
+let hintEl: HTMLElement;
 let ctx: CanvasRenderingContext2D;
 
-let laneW = 0, laneH = 0, headX = 0;
-let palette: { oxide: RGB; ink: RGB; ink2: RGB; tick: RGB };
+let palette = { ink: "#211F1A", dots: "#D0CCC0", oxide: "#C23B2B" };
 
 let hudState: HudState = { k: "hidden" };
-let listeningLike = false; // Listening or ConfirmDiscard: audio still capturing, paper still scrolling
-let bars: Bar[] = []; // index 0 = newest (at pen head), increasing index = further left/older
-let totalBars = 0; // for elapsed = totalBars * MS_PER_BAR
-let paperPx = 0; // cumulative scroll distance, drives tick phase; frozen when not listeningLike
-let greyOutStart: number | null = null;
-let greyed = false; // grey-out settled: later re-renders (theme change, lane resize) must keep the trace at ink2@40%
-let loopRunning = false;
-let wordAnim: Animation | null = null;
-let stampAnim: Animation | null = null;
-
-function hexToRgb(hex: string): RGB {
-  const n = parseInt(hex.trim().replace("#", ""), 16);
-  return [(n >> 16) & 255, (n >> 8) & 255, n & 255];
-}
-function rgba(c: RGB, a: number): string {
-  return `rgba(${c[0]},${c[1]},${c[2]},${a})`;
-}
-function lerp(a: number, b: number, t: number): number {
-  return a + (b - a) * t;
-}
-function lerpColor(c1: RGB, a1: number, c2: RGB, a2: number, t: number): string {
-  return rgba(
-    [lerp(c1[0], c2[0], t), lerp(c1[1], c2[1], t), lerp(c1[2], c2[2], t)],
-    lerp(a1, a2, t),
-  );
-}
+let bars: Bar[] = []; // newest last
+let totalBars = 0;
+let lastBarAt = 0; // performance.now() of the newest bar (drives sub-bar scroll)
+let listening = false; // canvas redraws ONLY while listening (§7 M4)
+let rafRunning = false;
 
 function readPalette() {
   const cs = getComputedStyle(document.documentElement);
-  const get = (name: string) => hexToRgb(cs.getPropertyValue(name));
-  palette = { oxide: get("--oxide"), ink: get("--ink"), ink2: get("--ink2"), tick: get("--tick") };
+  const get = (name: string) => cs.getPropertyValue(name).trim();
+  palette = { ink: get("--ink"), dots: get("--dots"), oxide: get("--oxide") };
 }
 
 function formatElapsed(ms: number): string {
   const totalSec = Math.floor(ms / 1000);
-  const m = Math.floor(totalSec / 60);
-  const s = totalSec % 60;
-  return `${m}:${String(s).padStart(2, "0")}`;
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")}`;
 }
 
-// --- status column -----------------------------------------------------
-
-function setWord(text: string, stamp = false) {
-  wordEl.textContent = text;
-  wordAnim?.cancel();
-  wordAnim = wordEl.animate(
-    [{ opacity: 1 }, { opacity: WORD_RESTING_OPACITY }],
-    { duration: DRY_MS, easing: EASE, fill: "forwards" },
-  );
-  if (stamp) {
-    stampAnim?.cancel();
-    stampAnim = wordEl.animate(
-      [
-        { transform: "translateY(0)", offset: 0, easing: "linear" },
-        { transform: "translateY(1px)", offset: 0.5, easing: EASE },
-        { transform: "translateY(0)", offset: 1 },
-      ],
-      { duration: 100 },
-    );
-  }
-}
-function setSub(text: string) {
-  subEl.textContent = text;
-}
-
-// --- lane (chart-recorder) ----------------------------------------------
+// --- waveform (pen trace) --------------------------------------------------
 
 function setupCanvas() {
-  const rect = canvas.getBoundingClientRect();
-  if (rect.width === 0 || rect.height === 0) return; // no-lane state / pre-layout: keep the last good geometry
-  laneW = rect.width;
-  laneH = rect.height;
-  headX = Math.round(laneW * 0.75); // pen head fixed at 75% of lane width; rounded so bars land on whole px (crisp 2px/1px, §2.2)
   const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.round(laneW * dpr);
-  canvas.height = Math.round(laneH * dpr);
+  laneEl.width = Math.round(LANE_W * dpr);
+  laneEl.height = Math.round(LANE_H * dpr);
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 
-function drawTickAt(x: number, h: number) {
-  ctx.fillRect(Math.round(x), laneH - h, 1, h);
+/** Signed pen deflection for a bar: amplitude with an alternating-phase sign so
+ * the trace oscillates about the zero line like a strip-chart pen. */
+function deflect(b: Bar): number {
+  return b.amp * AMP_PX * Math.sin(b.index * 1.9);
 }
-function drawTicks() {
-  ctx.fillStyle = rgba(palette.tick, 1);
-  const phaseMinor = ((paperPx % 8) + 8) % 8;
-  for (let x = headX - phaseMinor; x > -8; x -= 8) drawTickAt(x, 2);
-  for (let x = headX - phaseMinor + 8; x < laneW + 8; x += 8) drawTickAt(x, 2);
-  const phaseMajor = ((paperPx % 40) + 40) % 40;
-  for (let x = headX - phaseMajor; x > -40; x -= 40) drawTickAt(x, 4);
-  for (let x = headX - phaseMajor + 40; x < laneW + 40; x += 40) drawTickAt(x, 4);
-}
-function drawZeroLine() {
-  ctx.fillStyle = rgba(palette.ink2, 0.14);
-  ctx.fillRect(0, laneH / 2, laneW, 1);
-}
-function drawBars(now: number) {
-  const centerY = laneH / 2;
-  const maxHalf = centerY;
+
+function render(now: number) {
+  ctx.clearRect(0, 0, LANE_W, LANE_H);
+  // Zero line, 1px dots.
+  ctx.fillStyle = palette.dots;
+  ctx.fillRect(0, MID_Y, LANE_W, 1);
+  if (bars.length === 0) return;
+
+  // Newest bar sits at the right edge; sub-bar scroll interpolates between
+  // arrivals so the paper moves smoothly at 60fps while listening.
+  const frac = listening ? Math.min(1, (now - lastBarAt) / MS_PER_BAR) : 0;
+  const xOf = (i: number) =>
+    LANE_W - 1 - (bars.length - 1 - i + frac) * PX_PER_BAR;
+
+  ctx.strokeStyle = palette.ink;
+  ctx.lineWidth = 1.6;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  let started = false;
   for (let i = 0; i < bars.length; i++) {
-    const bar = bars[i];
-    const x = headX - i * BAR_PITCH - BAR_W;
-    if (x + BAR_W < 0) break; // everything further (higher i) is off-screen too
-    let color: string;
-    let half: number;
-    if (bar.clip) {
-      color = rgba(palette.oxide, 1);
-      half = maxHalf; // clipped bars stay oxide, full lane height, forever
-    } else {
-      half = Math.min(maxHalf, bar.amp * maxHalf);
-      if (greyOutStart !== null || greyed) {
-        const t = greyed ? 1 : Math.min(1, (now - greyOutStart!) / GREYOUT_MS);
-        color = lerpColor(palette.ink, 0.88, palette.ink2, 0.4, t);
-      } else {
-        const age = now - bar.bornAt;
-        color = age < DRY_MS
-          ? lerpColor(palette.oxide, 1, palette.ink, 0.88, Math.max(0, age / DRY_MS))
-          : rgba(palette.ink, 0.88);
-      }
-    }
-    ctx.fillStyle = color;
-    ctx.fillRect(x, centerY - half, BAR_W, half * 2);
+    const x = xOf(i);
+    if (x < -PX_PER_BAR) continue;
+    const y = MID_Y - deflect(bars[i]);
+    if (started) ctx.lineTo(x, y);
+    else { ctx.moveTo(x, y); started = true; }
+  }
+  ctx.stroke();
+
+  // Clip ticks: 2.4px oxide, 5px tall, from the top edge (§5.6). Oxide appears
+  // nowhere else.
+  ctx.fillStyle = palette.oxide;
+  for (let i = 0; i < bars.length; i++) {
+    if (!bars[i].clip) continue;
+    const x = xOf(i);
+    if (x < 0) continue;
+    ctx.fillRect(x - CLIP_TICK_W / 2, 0, CLIP_TICK_W, CLIP_TICK_H);
   }
 }
-function render(now: number) {
-  ctx.clearRect(0, 0, laneW, laneH);
-  drawTicks();
-  drawZeroLine();
-  drawBars(now);
-}
 
-function trimBars() {
-  const maxIndex = Math.ceil(headX / BAR_PITCH) + 2;
-  if (bars.length > maxIndex) bars.length = maxIndex;
-}
-function resetLane() {
-  bars = [];
-  paperPx = 0;
-  totalBars = 0;
-  greyOutStart = null;
-  greyed = false;
-}
-// Force any in-flight ink-dry to its resting state and paint one static frame
-// (Transcribing/Injected/idle-error: "nothing animates" per DESIGN §7 idle audit).
-function freezeBars() {
-  const settled = performance.now() - DRY_MS - 1;
-  for (const b of bars) b.bornAt = settled;
-  greyOutStart = null;
-  greyed = false;
-  render(performance.now());
-}
-function clearLaneStatic() {
-  bars = [];
-  paperPx = 0;
-  render(performance.now());
-}
-
-function ensureLoop() {
-  if (loopRunning) return;
-  loopRunning = true;
+function tick(now: number) {
+  if (!listening) { rafRunning = false; return; }
+  render(now);
   requestAnimationFrame(tick);
 }
-function tick(now: number) {
-  render(now);
-  const greyDone = greyOutStart !== null && now - greyOutStart >= GREYOUT_MS;
-  if (greyDone) {
-    greyOutStart = null;
-    greyed = true; // persist: re-renders during the 400ms DISCARDED hold must not un-grey
-  }
-  const dryInFlight = bars.some((b) => now - b.bornAt < DRY_MS);
-  const shouldContinue = listeningLike || greyOutStart !== null || dryInFlight;
-  if (shouldContinue) requestAnimationFrame(tick);
-  else loopRunning = false;
+function ensureRaf() {
+  if (rafRunning || !listening) return;
+  rafRunning = true;
+  requestAnimationFrame(tick);
 }
 
-// --- HUD protocol ---------------------------------------------------------
+function resetLane() {
+  bars = [];
+  totalBars = 0;
+}
 
 function onLevels(newBars: { amp: number; clip: boolean }[]) {
-  if (!listeningLike) return; // defensive: ignore stray bars outside a live session
-  const now = performance.now();
-  const k = newBars.length;
-  for (let idx = 0; idx < k; idx++) {
-    const b = newBars[idx];
-    bars.unshift({ amp: b.amp, clip: b.clip, bornAt: now - (k - 1 - idx) * MS_PER_BAR });
+  if (!listening) return; // stray bars outside a live session
+  for (const b of newBars) {
+    bars.push({ amp: b.amp, clip: b.clip, index: totalBars++ });
   }
-  totalBars += k;
-  paperPx += k * BAR_PITCH;
-  trimBars();
-  setSub(formatElapsed(totalBars * MS_PER_BAR));
-  ensureLoop();
+  const maxBars = Math.ceil(LANE_W / PX_PER_BAR) + 2;
+  if (bars.length > maxBars) bars = bars.slice(-maxBars);
+  lastBarAt = performance.now();
+  rightEl.textContent = formatElapsed(totalBars * MS_PER_BAR);
+  ensureRaf();
 }
 
-function fadeBody(show: boolean) {
-  document.body.classList.toggle("show", show);
+// --- state switch ----------------------------------------------------------
+
+type Slot = "lane" | "progress" | "msg" | "none";
+
+function layout(opts: {
+  label: string;
+  slot: Slot;
+  right?: string;
+  hint?: string;
+  frozenLane?: boolean;
+  msg?: string;
+}) {
+  stateEl.textContent = opts.label;
+  laneEl.hidden = opts.slot !== "lane";
+  laneEl.classList.toggle("frozen", !!opts.frozenLane);
+  progressEl.hidden = opts.slot !== "progress";
+  msgEl.hidden = opts.slot !== "msg";
+  if (opts.slot === "msg") msgEl.textContent = opts.msg ?? "";
+  rightEl.textContent = opts.right ?? "";
+  hintEl.textContent = opts.hint ?? "";
+  hintEl.hidden = !opts.hint;
+  // M3: content crossfade, 80ms linear.
+  contentEl.classList.remove("swap");
+  void contentEl.offsetWidth; // restart the animation
+  contentEl.classList.add("swap");
 }
 
 function onState(next: HudState) {
   const prev = hudState;
   hudState = next;
 
-  const wasHidden = prev.k === "hidden";
   const nowHidden = next.k === "hidden";
-  if (nowHidden !== wasHidden) fadeBody(!nowHidden);
+  if (nowHidden !== (prev.k === "hidden")) {
+    document.body.classList.toggle("show", !nowHidden);
+  }
 
-  listeningLike = next.k === "listening" || next.k === "confirm_discard";
-  pillEl.classList.toggle("no-lane", next.k === "error"); // error: hairline + lane hidden, the word takes the full row (DESIGN §2.1)
+  listening = next.k === "listening" || next.k === "confirm_discard";
 
   switch (next.k) {
     case "hidden":
       break;
     case "loading_model":
-      clearLaneStatic();
-      setWord("LOADING MODEL");
-      setSub(`${next.pct}%`);
+      // A fresh session may start here (cold start) — wipe the old trace.
+      resetLane();
+      layout({ label: "WARMING UP", slot: "progress", right: `${next.pct}%` });
+      fillEl.style.transform = `scaleX(${next.pct / 100})`;
       break;
     case "listening":
-      if (prev.k !== "confirm_discard") resetLane(); // same continuous recording, don't wipe the trace
-      setWord("LISTENING");
-      setSub(formatElapsed(totalBars * MS_PER_BAR));
-      ensureLoop();
-      break;
-    case "confirm_discard":
-      setWord("ESC AGAIN TO DISCARD");
-      ensureLoop();
+      // Same continuous recording when returning from HOLD ON or WARMING UP —
+      // keep the trace; anything else is a new take.
+      if (prev.k !== "confirm_discard" && prev.k !== "loading_model") resetLane();
+      layout({
+        label: "LISTENING",
+        slot: "lane",
+        right: formatElapsed(totalBars * MS_PER_BAR),
+        hint: "ESC ✕",
+      });
+      render(performance.now());
+      ensureRaf();
       break;
     case "transcribing":
-      freezeBars();
-      setWord("PRINTING");
+      layout({
+        label: "PRINTING…",
+        slot: "lane",
+        frozenLane: true,
+        right: formatElapsed(totalBars * MS_PER_BAR),
+      });
+      render(performance.now()); // one static frame, frozen at 45% via CSS
       break;
     case "injected":
-      freezeBars();
-      setWord("PRINTED", true);
-      setSub(`${next.chars} CH`);
+      layout({ label: "PRINTED", slot: "none", right: `${next.chars} CH` });
       break;
     case "cancelled":
-      greyOutStart = performance.now();
-      greyed = false;
-      setWord("DISCARDED");
-      setSub("");
-      ensureLoop();
+      layout({ label: "KILLED", slot: "none" });
+      break;
+    case "confirm_discard":
+      layout({
+        label: "HOLD ON",
+        slot: "msg",
+        msg: "ESC AGAIN KILLS THE TAKE",
+        right: formatElapsed(totalBars * MS_PER_BAR),
+      });
       break;
     case "error":
-      clearLaneStatic();
-      setWord(next.msg); // exact copy from Rust, rendered in ink, never oxide
-      setSub("");
+      layout({ label: next.label, slot: "msg", msg: next.detail });
       break;
   }
 }
@@ -286,42 +227,39 @@ function onHudEvent(e: HudEvent) {
 // --- theme -----------------------------------------------------------------
 
 function applyTheme(theme: string) {
-  const root = document.documentElement;
-  // Crossfade the pill colors on an actual theme change only (DESIGN §7, 160ms).
-  if (root.dataset.field && root.dataset.field !== theme) {
-    root.classList.add("theming");
-    window.setTimeout(() => root.classList.remove("theming"), 180);
-  }
-  root.dataset.field = theme;
+  document.documentElement.className = `theme-${theme.toLowerCase()}`;
   readPalette();
-  if (!loopRunning) render(performance.now()); // repaint the static frame in the new colors
+  if (!rafRunning) render(performance.now()); // repaint the static frame
 }
 
-// --- boot --------------------------------------------------------------
+// --- boot ------------------------------------------------------------------
 
 function init() {
   const host = document.getElementById("hud")!;
   host.innerHTML = `
-    <div class="pill">
-      <div class="word label"></div>
-      <div class="sub mono"></div>
-      <div class="hair"></div>
-      <canvas class="lane"></canvas>
+    <div class="hud">
+      <div class="square"></div>
+      <div class="content">
+        <div class="state label"></div>
+        <canvas class="lane" hidden></canvas>
+        <div class="progress" hidden><div class="fill"></div></div>
+        <div class="msg value-sm" hidden></div>
+        <div class="spacer"></div>
+        <div class="right hud-timer"></div>
+        <div class="hint value-xs" hidden></div>
+      </div>
     </div>`;
-  pillEl = host.querySelector(".pill")!;
-  wordEl = host.querySelector(".word")!;
-  subEl = host.querySelector(".sub")!;
-  canvas = host.querySelector(".lane")!;
-  ctx = canvas.getContext("2d")!;
+  contentEl = host.querySelector(".content")!;
+  stateEl = host.querySelector(".state")!;
+  laneEl = host.querySelector(".lane")!;
+  progressEl = host.querySelector(".progress")!;
+  fillEl = host.querySelector(".fill")!;
+  msgEl = host.querySelector(".msg")!;
+  rightEl = host.querySelector(".right")!;
+  hintEl = host.querySelector(".hint")!;
+  ctx = laneEl.getContext("2d")!;
   setupCanvas();
   readPalette();
-  // Long-word states shrink the lane (DESIGN §2.1): re-measure the backing
-  // store on any lane resize and repaint. The bars array survives the resize;
-  // an animation frame in flight repaints anyway.
-  new ResizeObserver(() => {
-    setupCanvas();
-    if (!loopRunning) render(performance.now());
-  }).observe(canvas);
 
   api.getConfig().then((c: Config) => applyTheme(c.theme));
   listen<Config>("config://changed", (e) => applyTheme(e.payload.theme));

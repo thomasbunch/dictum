@@ -1,7 +1,13 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Core IPC for all Dictum windows",
-  "windows": ["overlay", "settings", "history"],
-  "permissions": ["core:default"]
+  "description": "Core IPC for all Dictum windows; main additionally drives its custom titlebar",
+  "windows": ["overlay", "main"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close"
+  ]
 }

@@ -2,7 +2,7 @@
 // Owned by the orchestrator — keep in sync with types.rs.
 import { invoke, Channel } from "@tauri-apps/api/core";
 
-export type Theme = "LEDGER" | "BONE" | "PLASTER" | "GLACIER" | "LILAC" | "OBSIDIAN";
+export type Theme = "BONE" | "LEDGER" | "GLACIER" | "LILAC" | "OBSIDIAN";
 export type HotkeyMode = "hold" | "toggle" | "both";
 export type Retention = "keepNothing" | "hours24" | "days7" | "days30" | "forever";
 export type InjectBackend = "clipboard" | "sendInputUnicode";
@@ -39,7 +39,7 @@ export type HudState =
   | { k: "transcribing" }
   | { k: "injected"; chars: number }
   | { k: "cancelled" }
-  | { k: "error"; msg: string }
+  | { k: "error"; label: string; detail: string }
   | { k: "confirm_discard" };
 
 export type HudEvent =
@@ -47,12 +47,30 @@ export type HudEvent =
   | { t: "levels"; bars: LevelBar[] };
 
 export interface HistoryRecord {
-  id: number; ts: number; raw: string; text: string; exe: string | null;
+  id: number;
+  ts: number;
+  raw: string;
+  text: string;
+  exe: string | null;
+  /** Take length in ms; 0 for pre-TAPE rows. */
+  durMs: number;
+  clipped: boolean;
+  /** ≤64-point amplitude envelope; empty for pre-TAPE rows. */
+  envelope: number[];
+  /** "pasted" | "typed" | null for pre-TAPE rows. */
+  method: string | null;
 }
 
 export interface ModelInfo {
   id: string; display: string; present: boolean; sizeMb: number;
 }
+
+export type ModelStatus =
+  | { k: "missing" }
+  | { k: "loading"; pct: number }
+  | { k: "ready" }
+  | { k: "unloaded" }
+  | { k: "error"; msg: string };
 
 export type DownloadProgress =
   // snake_case fields: types.rs's enum-level rename_all renames only the variant
@@ -71,6 +89,7 @@ export const api = {
   tryHotkey: (chord: string) => invoke<void>("try_hotkey", { chord }),
   listInputDevices: () => invoke<string[]>("list_input_devices"),
   modelInfo: () => invoke<ModelInfo[]>("model_info"),
+  getModelStatus: () => invoke<ModelStatus>("get_model_status"),
   downloadModel: (id: string, onProgress: (p: DownloadProgress) => void) => {
     const ch = new Channel<DownloadProgress>();
     ch.onmessage = onProgress;
@@ -79,8 +98,9 @@ export const api = {
   historyList: (search: string | null) => invoke<HistoryRecord[]>("history_list", { search }),
   historyDelete: (id: number) => invoke<void>("history_delete", { id }),
   historyUndoDelete: () => invoke<void>("history_undo_delete"),
-  historyMeta: () => invoke<string>("history_meta"),
+  historyCount: () => invoke<number>("history_count"),
   pasteLast: () => invoke<void>("paste_last"),
+  toggleDictation: () => invoke<void>("toggle_dictation"),
   copyText: (text: string) => invoke<void>("copy_text", { text }),
   importReplacements: (text: string, format: "txt" | "json") =>
     invoke<number>("import_replacements", { text, format }),

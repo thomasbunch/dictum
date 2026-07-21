@@ -1,7 +1,8 @@
-// Shared across settings + history windows: theme applier, tiny DOM helper, fonts.
+// Shared across windows: theme applier, tiny DOM helper, fonts.
 import "@fontsource/ibm-plex-sans/400.css";
 import "@fontsource/ibm-plex-sans/600.css";
 import "@fontsource/ibm-plex-mono/400.css";
+import "@fontsource/ibm-plex-mono/500.css";
 import { listen } from "@tauri-apps/api/event";
 import { api, type Config } from "./bindings";
 
@@ -38,17 +39,11 @@ export function h<K extends keyof HTMLElementTagNameMap>(
 }
 
 // ---------------------------------------------------------------------------
-// Theme: dataset.field drives src/tokens.css [data-field="X"] selectors.
+// Theme: a class on <html> swaps all 10 tokens (DESIGN §9). Instant — no
+// transition (§7 M9).
 // ---------------------------------------------------------------------------
 export function applyTheme(cfg: Config): void {
-  const root = document.documentElement;
-  // Crossfade only on an actual theme change (DESIGN §7, 160ms) — never on the
-  // first apply, so page load doesn't flash a transition.
-  if (root.dataset.field && root.dataset.field !== cfg.theme) {
-    root.classList.add("theming");
-    window.setTimeout(() => root.classList.remove("theming"), 180);
-  }
-  root.dataset.field = cfg.theme;
+  document.documentElement.className = `theme-${cfg.theme.toLowerCase()}`;
 }
 
 /** get_config, retried until the backend has managed AppState. Every window's
@@ -92,7 +87,7 @@ export function mountError(err: unknown): void {
 }
 
 // ---------------------------------------------------------------------------
-// debounce — used by history search-as-you-type.
+// debounce — used by tape search-as-you-type.
 // ---------------------------------------------------------------------------
 export function debounce<A extends unknown[]>(fn: (...a: A) => void, ms: number): (...a: A) => void {
   let t: ReturnType<typeof setTimeout> | undefined;

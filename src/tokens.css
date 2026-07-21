@@ -1,66 +1,140 @@
-/* DICTUM design tokens — CALIPER/LEDGER (DESIGN.md §6).
-   Light variants derive paper/register/line/hair/tick from their field by the
-   LEDGER channel deltas; ink/ink2/num are shared across light variants.
-   Oxide is data-ink only (live pen bar + clipping). Never UI accent. */
+/* DICTUM design tokens — TAPE (DESIGN.md §1/§9).
+   Theme = a class on <html> defining all 10 tokens; applying = swapping the
+   class, instant, no transition (§7 M9). BONE is the default (:root).
+   Oxide marks clipped audio only (§10 rule 1) — never UI accent. */
 
-:root, [data-field="LEDGER"] {
+:root, .theme-bone {
+  --field: #E9E6DF; --paper: #F1EFE9; --register: #DCD8CE;
+  --ink: #211F1A; --ink2: #57534A; --line: #A8A296;
+  --hair: #D6D2C7; --hair2: #E0DCD2; --dots: #D0CCC0;
+  --oxide: #C23B2B;
+}
+.theme-ledger {
   --field: #DCE2D0; --paper: #E3E8D9; --register: #C8D1B9;
   --ink: #1C211A; --ink2: #4F584A; --line: #9AA38D;
-  --hair: #BEC6B1; --hair2: #ACB49E; --tick: #47503F;
-  --num: #2E332A; --oxide: #C23B2B;
+  --hair: #C5CDB6; --hair2: #D3DAC5; --dots: #BEC6B1;
+  --oxide: #C23B2B;
 }
-[data-field="BONE"] {
-  --field: #E9E6DF; --paper: #F0ECE8; --register: #D5D5C8;
-  --ink: #1C211A; --ink2: #4F584A; --line: #A7A79C;
-  --hair: #CBCAC0; --hair2: #B9B8AD; --tick: #54544E;
-  --num: #2E332A; --oxide: #C23B2B;
+.theme-glacier {
+  --field: #D9E0E6; --paper: #E4EAEF; --register: #C6CFD8;
+  --ink: #1A1F24; --ink2: #49525C; --line: #96A0AC;
+  --hair: #C4CCD4; --hair2: #CBD3DA; --dots: #BCC5CE;
+  --oxide: #C23B2B;
 }
-[data-field="PLASTER"] {
-  --field: #E8DAD2; --paper: #EFE0DB; --register: #D4C9BB;
-  --ink: #1C211A; --ink2: #4F584A; --line: #A69B8F;
-  --hair: #CABEB3; --hair2: #B8ACA0; --tick: #534841;
-  --num: #2E332A; --oxide: #B93326;
+.theme-lilac {
+  --field: #E0DBE6; --paper: #EAE6EF; --register: #CEC7D8;
+  --ink: #201C26; --ink2: #554F5E; --line: #A29AAE;
+  --hair: #CEC8D6; --hair2: #D6D0DE; --dots: #C6BFD0;
+  --oxide: #C23B2B;
 }
-[data-field="GLACIER"] {
-  --field: #D9E0E6; --paper: #E0E6EF; --register: #C5CFCF;
-  --ink: #1C211A; --ink2: #4F584A; --line: #97A1A3;
-  --hair: #BBC4C7; --hair2: #A9B2B4; --tick: #444E55;
-  --num: #2E332A; --oxide: #C23B2B;
-}
-[data-field="LILAC"] {
-  --field: #E0DBE6; --paper: #E7E1EF; --register: #CCCACF;
-  --ink: #1C211A; --ink2: #4F584A; --line: #9E9CA3;
-  --hair: #C2BFC7; --hair2: #B0ADB4; --tick: #4B4955;
-  --num: #2E332A; --oxide: #C23B2B;
-}
-[data-field="OBSIDIAN"] {
-  --field: #211D22; --paper: #2A252B; --register: #332D34;
-  --ink: #E6E1E7; --ink2: #A79FA8; --line: #4A434B;
-  --hair: #3B353C; --hair2: #443D45; --tick: #8F878F;
-  --num: #D8D2D9; --oxide: #E05A3F;
+.theme-obsidian {
+  --field: #211D22; --paper: #2A262B; --register: #191619;
+  --ink: #EAE7E0; --ink2: #A5A09A; --line: #5A5560;
+  --hair: #3A353C; --hair2: #2E2A30; --dots: #38333A;
+  --oxide: #E05A3F;
 }
 
-/* Base reset shared by every window */
-* { margin: 0; padding: 0; box-sizing: border-box; user-select: none; }
+:root { --ease: cubic-bezier(0.2, 0, 0, 1); }
+
+/* Theme cards (SETUP · APPEARANCE, §5.4.6): each card renders ITS OWN theme's
+   field/ink, which the active theme's tokens cannot supply — these are the §1
+   token values restated per card, part of the token definitions above. */
+.theme-card.bone { background: #E9E6DF; color: #211F1A; }
+.theme-card.ledger { background: #DCE2D0; color: #1C211A; }
+.theme-card.glacier { background: #D9E0E6; color: #1A1F24; }
+.theme-card.lilac { background: #E0DBE6; color: #201C26; }
+.theme-card.obsidian { background: #211D22; color: #EAE7E0; }
+
+/* Base reset shared by every window. Radius 0 everywhere (§10 rule 9); no
+   shadows/gradients/blur (§10 rule 10). */
+* { margin: 0; padding: 0; box-sizing: border-box; border-radius: 0; user-select: none; }
+input, textarea { user-select: text; }
 html, body { background: transparent; }
 body {
   font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
   color: var(--ink);
-  font-size: 13px; line-height: 20px;
+  font-size: 13.5px;
+  line-height: 1.55;
   -webkit-font-smoothing: antialiased;
 }
-/* Theme swatch apply (DESIGN §7): 160ms crossfade of the themed colors. Scoped
-   to the transient .theming flag (set on <html> only during a data-field swap)
-   so hover/state tone changes stay instant (§7: hover 0ms). */
-html.theming, html.theming *, html.theming *::before, html.theming *::after {
-  transition: background-color 160ms cubic-bezier(0.2, 0, 0, 1),
-              color 160ms cubic-bezier(0.2, 0, 0, 1),
-              border-color 160ms cubic-bezier(0.2, 0, 0, 1);
-}
 
+/* ---- Type scale (§2) --------------------------------------------------- */
 .mono { font-family: "IBM Plex Mono", Consolas, monospace; }
+.wordmark {
+  font: 600 20px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.30em; text-transform: uppercase;
+}
 .label {
-  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
-  font-size: 11px; line-height: 16px; font-weight: 600;
+  font: 600 10px "IBM Plex Sans", sans-serif;
   letter-spacing: 0.18em; text-transform: uppercase;
 }
+.microlabel {
+  font: 600 9px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.18em; text-transform: uppercase;
+}
+.action {
+  font: 600 9px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.14em; text-transform: uppercase;
+  text-decoration: underline; text-underline-offset: 3px;
+  color: var(--ink);
+  background: none; border: none; cursor: pointer;
+}
+.action:hover { color: var(--ink2); }
+.body { font: 400 13.5px/1.55 "IBM Plex Sans", sans-serif; }
+.value-lg { font: 500 28px "IBM Plex Mono", monospace; }
+.value { font: 400 11px "IBM Plex Mono", monospace; text-transform: uppercase; }
+.value-sm { font: 400 10px/1.65 "IBM Plex Mono", monospace; text-transform: uppercase; }
+.value-xs { font: 400 9px "IBM Plex Mono", monospace; text-transform: uppercase; }
+.keycap-text { font: 400 12px "IBM Plex Mono", monospace; text-transform: uppercase; }
+.hud-timer { font: 400 13px "IBM Plex Mono", monospace; }
+.ink2 { color: var(--ink2); }
+
+/* ---- Interactive states (§4) ------------------------------------------- */
+:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+button, select { font: inherit; color: inherit; }
+
+.btn {
+  font: 600 10px "IBM Plex Sans", sans-serif;
+  letter-spacing: 0.18em; text-transform: uppercase;
+  color: var(--ink);
+  border: 1px solid var(--ink); background: var(--paper);
+  padding: 6px 14px; cursor: pointer;
+}
+.btn:hover { background: var(--register); }
+.btn:active, .action:active { transform: translateY(1px); }
+.btn:disabled, .action:disabled, [disabled], .disabled {
+  opacity: 0.38; cursor: default; pointer-events: none;
+}
+
+.field-input {
+  font: 400 11px "IBM Plex Mono", monospace;
+  color: var(--ink);
+  border: 1px solid var(--line); background: var(--paper);
+  padding: 6px 10px;
+}
+.field-input::placeholder { color: var(--ink2); text-transform: uppercase; }
+.field-input:focus { border-color: var(--ink); }
+
+/* Toggle: 36x16 track, 10x10 square knob inset 2px (§4). */
+.toggle { display: inline-block; position: relative; width: 36px; height: 16px; cursor: pointer; flex: none; }
+.toggle input { position: absolute; opacity: 0; inset: 0; margin: 0; cursor: pointer; }
+.toggle .track {
+  position: absolute; inset: 0;
+  border: 1px solid var(--ink); background: var(--paper);
+}
+.toggle .knob {
+  position: absolute; top: 2px; left: 2px; width: 10px; height: 10px;
+  background: var(--ink2);
+}
+.toggle input:checked ~ .track .knob { left: auto; right: 2px; background: var(--ink); }
+.toggle input:focus-visible ~ .track { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* Radio: 10x10 square, filled ink when selected (§4). */
+.radio { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+.radio input { position: absolute; opacity: 0; width: 10px; height: 10px; margin: 0; cursor: pointer; }
+.radio .box { width: 10px; height: 10px; border: 1px solid var(--ink); background: transparent; flex: none; }
+.radio input:checked + .box { background: var(--ink); }
+.radio input:focus-visible + .box { outline: 2px solid var(--ink); outline-offset: 2px; }
+
+/* Native select, flattened to spec. */
+select.field-input { appearance: none; -webkit-appearance: none; cursor: pointer; }

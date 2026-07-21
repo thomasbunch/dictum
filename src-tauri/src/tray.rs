@@ -7,7 +7,7 @@ use tauri::{
     image::Image,
     menu::{IsMenuItem, Menu, MenuItem, PredefinedMenuItem},
     tray::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent},
-    AppHandle, Manager,
+    AppHandle, Emitter, Manager,
 };
 
 use crate::types::{Config, CoordMsg};
@@ -37,7 +37,8 @@ pub struct Tray {
     app: AppHandle,
     recording: bool,
     mic_error: bool,
-    binding: String, // human display, e.g. "Ctrl + Win"
+    paste_enabled: bool, // a transcription is held for PasteLast (DESIGN §5.7)
+    binding: String,     // human display, e.g. "Ctrl + Alt + Space"
 }
 
 pub fn init(app: &AppHandle, tx: Sender<CoordMsg>, cfg: &Config) -> tauri::Result<Tray> {
@@ -52,7 +53,14 @@ pub fn init(app: &AppHandle, tx: Sender<CoordMsg>, cfg: &Config) -> tauri::Resul
         .on_menu_event(move |app, ev| handle_menu(app, ev.id.as_ref(), &tx_menu))
         .on_tray_icon_event(move |tray, ev| handle_tray_event(tray, ev, &tx))
         .build(app)?;
-    Ok(Tray { icon, app: app.clone(), recording: false, mic_error: false, binding })
+    Ok(Tray {
+        icon,
+        app: app.clone(),
+        recording: false,
+        mic_error: false,
+        paste_enabled: false,
+        binding,
+    })
 }
 
 impl Tray {
@@ -77,19 +85,38 @@ impl Tray {
         self.refresh_menu();
     }
 
+    /// Enable "Paste last transcription" once a take is held (DESIGN §5.7).
+    pub fn set_paste_enabled(&mut self, on: bool) {
+        if on == self.paste_enabled {
+            return;
+        }
+        self.paste_enabled = on;
+        self.refresh_menu();
+    }
+
     fn refresh_menu(&self) {
-        if let Ok(menu) = build_menu(&self.app, self.recording, self.mic_error, &self.binding) {
+        if let Ok(menu) = build_menu(&self.app, self.recording, self.paste_enabled, &self.binding) {
             let _ = self.icon.set_menu(Some(menu));
         }
     }
+}
+
+/// Show the main window and switch it to `view` ("tape" | "setup").
+fn open_main(app: &AppHandle, view: &str) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.unminimize();
+        let _ = w.show();
+        let _ = w.set_focus();
+    }
+    let _ = app.emit("nav://view", view);
 }
 
 fn handle_menu(app: &AppHandle, id: &str, tx: &Sender<CoordMsg>) {
     match id {
         "toggle" => { let _ = tx.send(CoordMsg::ToggleDictation); }
         "paste_last" => { let _ = tx.send(CoordMsg::PasteLast); }
-        "history" => show_window(app, "history"),
-        "settings" => show_window(app, "settings"),
+        "history" => open_main(app, "tape"),
+        "settings" => open_main(app, "setup"),
         "quit" => app.exit(0),
         _ => {}
     }
@@ -98,50 +125,32 @@ fn handle_menu(app: &AppHandle, id: &str, tx: &Sender<CoordMsg>) {
 fn handle_tray_event(tray: &TrayIcon, ev: TrayIconEvent, tx: &Sender<CoordMsg>) {
     match ev {
         // ponytail: a double-click also emits two single-clicks, so it toggles
-        // twice then opens Settings. Acceptable v1 tray behavior; de-dupe with a
+        // twice then opens the tape. Acceptable v1 tray behavior; de-dupe with a
         // click timer only if it annoys.
         TrayIconEvent::Click { button: MouseButton::Left, button_state: MouseButtonState::Up, .. } => {
             let _ = tx.send(CoordMsg::ToggleDictation);
         }
         TrayIconEvent::DoubleClick { button: MouseButton::Left, .. } => {
-            show_window(tray.app_handle(), "settings");
+            open_main(tray.app_handle(), "tape");
         }
         _ => {}
     }
 }
 
-fn show_window(app: &AppHandle, label: &str) {
-    if let Some(w) = app.get_webview_window(label) {
-        let _ = w.unminimize();
-        let _ = w.show();
-        let _ = w.set_focus();
-    }
-}
-
-fn build_menu(app: &AppHandle, recording: bool, mic_error: bool, binding: &str) -> tauri::Result<Menu<tauri::Wry>> {
-    let nomic = MenuItem::with_id(app, "nomic", "NO MICROPHONE", false, None::<&str>)?;
-    let sep_a = PredefinedMenuItem::separator(app)?;
-    let header = MenuItem::with_id(app, "header", "DICTUM", false, None::<&str>)?;
-    let sep_b = PredefinedMenuItem::separator(app)?;
+/// DESIGN §5.7 item list, verbatim. The OS draws the menu.
+fn build_menu(app: &AppHandle, recording: bool, paste_enabled: bool, binding: &str) -> tauri::Result<Menu<tauri::Wry>> {
     let toggle_label = if recording { "Stop dictation" } else { "Start dictation" };
     // Windows native menus right-align text after a tab as the accelerator column.
     let toggle = MenuItem::with_id(app, "toggle", format!("{toggle_label}\t{binding}"), true, None::<&str>)?;
-    let paste = MenuItem::with_id(app, "paste_last", "Paste last transcription", true, None::<&str>)?;
-    let sep_c = PredefinedMenuItem::separator(app)?;
-    let history = MenuItem::with_id(app, "history", "History\u{2026}", true, None::<&str>)?;
-    let settings = MenuItem::with_id(app, "settings", "Settings\u{2026}", true, None::<&str>)?;
-    let sep_d = PredefinedMenuItem::separator(app)?;
+    let paste = MenuItem::with_id(app, "paste_last", "Paste last transcription", paste_enabled, None::<&str>)?;
+    let sep_a = PredefinedMenuItem::separator(app)?;
+    let history = MenuItem::with_id(app, "history", "History", true, None::<&str>)?;
+    let settings = MenuItem::with_id(app, "settings", "Settings", true, None::<&str>)?;
+    let sep_b = PredefinedMenuItem::separator(app)?;
     let quit = MenuItem::with_id(app, "quit", "Quit Dictum", true, None::<&str>)?;
 
-    let mut items: Vec<&dyn IsMenuItem<tauri::Wry>> = Vec::new();
-    if mic_error {
-        items.push(&nomic);
-        items.push(&sep_a);
-    }
-    items.extend([
-        &header as &dyn IsMenuItem<tauri::Wry>,
-        &sep_b, &toggle, &paste, &sep_c, &history, &settings, &sep_d, &quit,
-    ]);
+    let items: Vec<&dyn IsMenuItem<tauri::Wry>> =
+        vec![&toggle, &paste, &sep_a, &history, &settings, &sep_b, &quit];
     Menu::with_items(app, &items)
 }
 

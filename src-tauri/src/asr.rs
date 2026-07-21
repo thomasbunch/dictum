@@ -73,7 +73,12 @@ fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>) {
                 let text = decode(rec.as_ref().unwrap(), &samples);
                 let _ = tx.send(CoordMsg::DecodeDone { generation, text });
             }
-            AsrCmd::Unload => rec = None,
+            AsrCmd::Unload => {
+                rec = None;
+                // Distinct from Ready so the next take warms the model up front
+                // and SETUP can print "○ IDLE — UNLOADED".
+                let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Unloaded));
+            }
         }
     }
 }
@@ -115,10 +120,10 @@ fn ensure(rec: &mut Option<OfflineRecognizer>, tx: &Sender<CoordMsg>) -> bool {
             true
         }
         None => {
-            // Files present but the recognizer wouldn't init — surface the only
-            // sanctioned ASR-failure copy (DESIGN §1.2). Keep the detail in the log.
+            // Files present but the recognizer wouldn't init — surface the wire
+            // voice (DESIGN §6). Keep the detail in the log.
             eprintln!("asr: recognizer failed to initialize");
-            status(ModelStatus::Error("MODEL NOT FOUND".into()));
+            status(ModelStatus::Error("THE MODEL WOULD NOT LOAD".into()));
             false
         }
     }

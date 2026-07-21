@@ -4,20 +4,34 @@
 
 use tauri::{AppHandle, Manager, PhysicalPosition};
 
-/// DESIGN §2.1: HUD bottom edge sits 48px above the work-area bottom (above the
+/// DESIGN §5.6: HUD bottom edge sits 24px above the work-area bottom (above the
 /// taskbar). We query the real per-monitor work area (Win32 GetMonitorInfo), so
 /// this is the true gap — no taskbar guessing.
-const GAP_LOGICAL: f64 = 48.0;
+const GAP_LOGICAL: f64 = 24.0;
 
-/// Fallback gap when the work-area query fails: full-monitor height minus a
-/// 48px taskbar allowance plus the 48px design gap.
-const GAP_LOGICAL_FALLBACK: f64 = 48.0 + 48.0;
+/// Fallback gap when the work-area query fails: the 24px design gap plus a
+/// 48px taskbar allowance (full-monitor rect includes the taskbar).
+const GAP_LOGICAL_FALLBACK: f64 = 24.0 + 48.0;
 
-/// Call once at startup: make the overlay permanently click-through.
+/// Call once at startup: make the overlay click-through (the default state).
 pub fn setup(app: &AppHandle) {
     if let Some(w) = app.get_webview_window("overlay") {
         let _ = w.set_ignore_cursor_events(true);
     }
+}
+
+/// DESIGN §5.6: the HUD is click-through EXCEPT during confirm_discard and
+/// error. Window calls off the coordinator thread proved unreliable — hop to
+/// the main thread like show/hide.
+pub fn set_click_through(app: &AppHandle, click_through: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("overlay") {
+            if let Err(e) = w.set_ignore_cursor_events(click_through) {
+                eprintln!("overlay: set_ignore_cursor_events failed: {e}");
+            }
+        }
+    });
 }
 
 /// Position bottom-center on the cursor's monitor and show. No animation here —
@@ -135,39 +149,39 @@ mod tests {
 
     #[test]
     fn centers_and_lifts_off_bottom() {
-        // 1920x1080 primary, 320x32 strip, 96px gap.
-        let (x, y) = bottom_center(0, 0, 1920, 1080, 320, 32, 96);
-        assert_eq!(x, (1920 - 320) / 2);
-        assert_eq!(y, 1080 - 32 - 96);
+        // 1920x1080 primary, 400x52 HUD, 24px gap.
+        let (x, y) = bottom_center(0, 0, 1920, 1080, 400, 52, 24);
+        assert_eq!(x, (1920 - 400) / 2);
+        assert_eq!(y, 1080 - 52 - 24);
     }
 
     #[test]
     fn honors_monitor_origin_on_second_display() {
         // second monitor to the right at x=1920.
-        let (x, y) = bottom_center(1920, 0, 1280, 720, 320, 32, 96);
-        assert_eq!(x, 1920 + (1280 - 320) / 2);
-        assert_eq!(y, 720 - 32 - 96);
+        let (x, y) = bottom_center(1920, 0, 1280, 720, 400, 52, 24);
+        assert_eq!(x, 1920 + (1280 - 400) / 2);
+        assert_eq!(y, 720 - 52 - 24);
     }
 
     #[test]
     fn window_size_rescales_to_target_monitor() {
-        // Mixed DPI: strip last shown on a 100% monitor (320x32 physical),
-        // target monitor at 150% -> place as 480x48.
-        assert_eq!(rescale(320, 1.0, 1.5), 480);
-        assert_eq!(rescale(32, 1.0, 1.5), 48);
+        // Mixed DPI: HUD last shown on a 100% monitor (400x52 physical),
+        // target monitor at 150% -> place as 600x78.
+        assert_eq!(rescale(400, 1.0, 1.5), 600);
+        assert_eq!(rescale(52, 1.0, 1.5), 78);
         // And back down.
-        assert_eq!(rescale(480, 1.5, 1.0), 320);
-        assert_eq!(rescale(48, 1.5, 1.0), 32);
+        assert_eq!(rescale(600, 1.5, 1.0), 400);
+        assert_eq!(rescale(78, 1.5, 1.0), 52);
         // Uniform DPI: unchanged.
-        assert_eq!(rescale(320, 1.25, 1.25), 320);
+        assert_eq!(rescale(400, 1.25, 1.25), 400);
     }
 
     #[test]
     fn gap_scales_with_dpi() {
-        // 48px design gap above the work-area bottom (§2.1), DPI-scaled.
-        assert_eq!(gap_px(GAP_LOGICAL, 1.0), 48);
-        assert_eq!(gap_px(GAP_LOGICAL, 1.5), 72);
+        // 24px design gap above the work-area bottom (§5.6), DPI-scaled.
+        assert_eq!(gap_px(GAP_LOGICAL, 1.0), 24);
+        assert_eq!(gap_px(GAP_LOGICAL, 1.5), 36);
         // Fallback (full monitor + taskbar allowance).
-        assert_eq!(gap_px(GAP_LOGICAL_FALLBACK, 1.0), 96);
+        assert_eq!(gap_px(GAP_LOGICAL_FALLBACK, 1.0), 72);
     }
 }

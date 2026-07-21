@@ -1,62 +1,114 @@
-/* DICTUM HUD overlay — DESIGN.md §2 (binding, every px). Window is a fixed
-   320x32 transparent surface; this file draws the pill inside it. */
+/* DICTUM HUD overlay — DESIGN.md §5.6 (binding). Fixed 400x52 window; 1px ink
+   border, field fill, radius 0. */
 
 html, body {
-  width: 320px;
-  height: 32px;
+  width: 400px;
+  height: 52px;
   overflow: hidden;
 }
 
+/* M1 show: rise 8px + fade, 120ms. M2 hide: fade only, 100ms ease-in — the
+   rise lives on .hud as a one-shot animation so the fade-out never jumps. */
 body {
-  opacity: 0; /* Hidden state: nothing on screen (DESIGN §2.3). */
-  transition: opacity 160ms cubic-bezier(0.2, 0, 0, 1);
+  opacity: 0;
+  transition: opacity 100ms ease-in;
 }
 body.show {
   opacity: 1;
-  transition: opacity 120ms cubic-bezier(0.2, 0, 0, 1);
+  transition: opacity 120ms var(--ease);
+}
+body.show .hud { animation: hud-rise 120ms var(--ease); }
+@keyframes hud-rise {
+  from { transform: translateY(8px); }
+  to { transform: translateY(0); }
 }
 
-.pill {
+.hud {
   box-sizing: border-box;
-  width: 320px;
-  height: 32px;
-  padding: 4px 8px; /* 4px vertical is DESIGN §2.1's documented 8px-grid deviation: keeps a 24px lane inside 32px */
-  background: var(--paper);
-  border-radius: 2px;
-  box-shadow: inset 0 0 0 1px var(--line); /* inset shadow, not a real border: keeps the box exactly 320x32 so the padded content math (304x24) is exact */
+  width: 400px;
+  height: 52px;
+  background: var(--field);
+  border: 1px solid var(--ink);
   display: flex;
   align-items: center;
-  gap: 8px; /* word · sub · hairline · lane, 8px between each (DESIGN §2.1) */
+  gap: 12px;
+  padding: 0 14px;
 }
 
-.word {
+.square {
+  width: 8px;
+  height: 8px;
+  background: var(--ink); /* stays ink in every state — oxide never means error */
+  flex: none;
+}
+
+.state {
   color: var(--ink);
-  white-space: nowrap; /* long copy ("ESC AGAIN TO DISCARD", error text) grows the word; the lane shrinks and re-measures (DESIGN §2.1) */
-}
-.sub {
-  color: var(--ink2);
   white-space: nowrap;
-}
-.sub:empty {
-  display: none; /* no phantom flex gap: word-to-hairline stays 8px when there is no sub (DESIGN §2.1) */
+  flex: none;
 }
 
-.hair {
-  flex: 0 0 1px;
-  width: 1px;
-  align-self: stretch; /* full inner height (24px) */
-  background: var(--hair);
-}
-
+/* Center slot: waveform canvas 140x32 | progress 140x6 | message. Geometry
+   never changes across state swaps (M3). */
 .lane {
-  flex: 1 1 0; /* basis 0: ignore the canvas's intrinsic 300x150 default, take exactly the remaining space */
-  min-width: 0; /* let a long status word shrink the lane below the canvas's intrinsic width instead of overflowing the pill */
-  height: 24px;
+  width: 140px;
+  height: 32px;
+  flex: none;
   display: block;
 }
+.lane.frozen { opacity: 0.45; } /* PRINTING…: trace frozen at 45% */
 
-/* Error states: hairline + lane hidden, the word takes the full row (DESIGN §2.1/§2.3). */
-.pill.no-lane .hair,
-.pill.no-lane .lane {
-  display: none;
+.progress {
+  width: 140px;
+  height: 6px;
+  flex: none;
+  background: var(--hair);
+  overflow: hidden;
+}
+.progress .fill {
+  width: 100%;
+  height: 100%;
+  background: var(--ink);
+  transform-origin: left;
+  transform: scaleX(0);
+  transition: transform 160ms linear; /* M5 */
+}
+
+.msg {
+  color: var(--ink2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  min-width: 0;
+}
+
+.spacer { flex: 1 1 0; min-width: 0; }
+
+.right {
+  color: var(--ink);
+  white-space: nowrap;
+  flex: none;
+}
+
+.hint {
+  color: var(--ink2);
+  white-space: nowrap;
+  flex: none;
+}
+
+[hidden] { display: none !important; }
+
+/* M3: state swap = content crossfade, 80ms linear. The .swap class is re-added
+   on every transition; geometry is untouched. */
+.content {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex: 1 1 0;
+  min-width: 0;
+}
+.content.swap { animation: hud-swap 80ms linear; }
+@keyframes hud-swap {
+  from { opacity: 0; }
+  to { opacity: 1; }
 }

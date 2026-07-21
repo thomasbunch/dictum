@@ -14,7 +14,7 @@ Currently in development. Milestone M0 (proof of concept on real hardware) and M
 
 ### Installer (Recommended)
 
-1. Download the latest installer from [GitHub Releases](https://github.com/username/dictum/releases)
+1. Download the latest installer from [GitHub Releases](https://github.com/thomasbunch/dictum/releases)
 2. Run `Dictum-Setup.exe` (per-user, no admin required)
 3. On first launch, the app downloads the English ASR model (~630 MB) and stores it in `%APPDATA%\Dictum\models\`
 4. Press and hold **Ctrl+Win** to start dictating; release to transcribe and paste

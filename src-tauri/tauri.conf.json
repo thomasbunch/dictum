@@ -24,26 +24,20 @@
         "focus": false,
         "focusable": false,
         "resizable": false,
-        "width": 320,
-        "height": 32
+        "width": 400,
+        "height": 52
       },
       {
-        "label": "settings",
-        "url": "settings.html",
+        "label": "main",
+        "url": "main.html",
         "title": "DICTUM",
         "visible": false,
-        "resizable": false,
-        "width": 560,
-        "height": 720
-      },
-      {
-        "label": "history",
-        "url": "history.html",
-        "title": "DICTUM — HISTORY",
-        "visible": false,
+        "decorations": false,
         "resizable": true,
-        "width": 560,
-        "height": 480
+        "width": 880,
+        "height": 700,
+        "minWidth": 720,
+        "minHeight": 520
       }
     ],
     "security": {

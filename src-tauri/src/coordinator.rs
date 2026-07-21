@@ -11,16 +11,16 @@ use crate::types::*;
 use std::sync::mpsc::{Receiver, RecvTimeoutError};
 use std::time::{Duration, Instant};
 
-// Timing constants (CONTRACTS + DESIGN §2.3).
+// Timing constants (CONTRACTS + DESIGN §5.6 dwell column).
 const TAP_MS: u128 = 400; // tap-vs-hold threshold
 const CONFIRM_ELAPSED_S: u64 = 30; // recording length that arms Esc double-confirm
 const CONFIRM_WINDOW_MS: u64 = 2000; // ConfirmDiscard revert window
-const HUD_INJECTED_MS: u64 = 600;
-const HUD_CANCELLED_MS: u64 = 400;
-const HUD_ERROR_MS: u64 = 4000;
-// §2.4 hide fade is 160ms in the webview; hide the native window a hair later
+const HUD_INJECTED_MS: u64 = 900;
+const HUD_CANCELLED_MS: u64 = 500;
+const HUD_ERROR_MS: u64 = 2400;
+// §7 M2 hide fade is 100ms in the webview; hide the native window a hair later
 // so the fade is never clipped.
-const HUD_FADE_MS: u64 = 200;
+const HUD_FADE_MS: u64 = 150;
 // ponytail: fixed idle-unload delay; make it a config knob only if RAM tuning demands.
 const IDLE_UNLOAD_MS: u64 = 30_000;
 
@@ -56,9 +56,14 @@ pub trait Effects {
     fn toast(&mut self, msg: String);
     /// Exe file name owning `hwnd`, for the history per-app column (PLAN §9).
     fn foreground_exe(&mut self, hwnd: isize) -> Option<String>;
-    fn append_history(&mut self, raw: String, text: String, exe: Option<String>);
+    fn append_history(&mut self, raw: String, text: String, exe: Option<String>, meta: TakeMeta);
     fn apply_replacements(&mut self, raw: &str) -> String;
     fn set_esc_armed(&mut self, armed: bool);
+    /// Model status changed — surface to the main window (SETUP model card,
+    /// masthead status line). Default no-op keeps test mocks small.
+    fn announce_model_status(&mut self, _st: &ModelStatus) {}
+    /// A transcription is now held for PasteLast — the tray menu item enables.
+    fn set_paste_available(&mut self, _on: bool) {}
     fn now(&mut self) -> Instant;
 }
 
@@ -98,6 +103,8 @@ pub struct Coordinator {
     started: bool,          // CaptureStarted seen (gates start cue + LISTENING)
     confirm_pending: bool,  // ConfirmDiscard shown, awaiting 2nd Esc
     target_hwnd: isize,     // foreground captured at hotkey-down
+    level_amps: Vec<f32>,   // per-bar amplitudes for the take envelope (37.5ms each)
+    take_clipped: bool,     // any bar hit >= -1 dBFS this session
 
     last_text: Option<String>, // for PasteLast
     timer: Option<(Instant, Timer)>,
@@ -117,6 +124,8 @@ impl Coordinator {
             started: false,
             confirm_pending: false,
             target_hwnd: 0,
+            level_amps: Vec::new(),
+            take_clipped: false,
             last_text: None,
             timer: None,
         }
@@ -150,6 +159,18 @@ impl Coordinator {
         self.tail_sent = false;
         self.started = false;
         self.confirm_pending = false;
+        self.level_amps.clear();
+        self.take_clipped = false;
+    }
+
+    /// Take metadata for the history record (DESIGN §5.2 expanded row).
+    fn take_meta(&self, method: InjectMethod) -> TakeMeta {
+        TakeMeta {
+            dur_ms: (self.level_amps.len() as f64 * crate::types::BAR_SAMPLES as f64 / 16.0) as i64,
+            clipped: self.take_clipped,
+            envelope: downsample_envelope(&self.level_amps, 64),
+            method: Some(method),
+        }
     }
 
     /// Dispatch a decode now, or queue it if the model isn't ready yet.
@@ -218,12 +239,12 @@ impl Coordinator {
     }
 
     /// Terminal failure: bump generation (drop any in-flight decodes), error cue,
-    /// DESIGN §1.2 copy on the HUD, end the session, 4 s hide timer. `tray_error`
-    /// additionally drives the tray NO MICROPHONE glyph/menu row.
-    fn fail(&mut self, fx: &mut dyn Effects, msg: &str, tray_error: bool) {
+    /// DESIGN §6 wire-voice copy on the HUD, end the session, 2.4 s hide timer.
+    /// `tray_error` additionally drives the tray mic-error glyph.
+    fn fail(&mut self, fx: &mut dyn Effects, label: &str, detail: &str, tray_error: bool) {
         self.gen = self.gen.wrapping_add(1);
         self.cue(fx, CueKind::Error);
-        self.set_state(fx, HudState::Error { msg: msg.into() });
+        self.set_state(fx, HudState::Error { label: label.into(), detail: detail.into() });
         self.end_session(fx);
         if tray_error {
             fx.set_tray_error();
@@ -279,6 +300,16 @@ impl Coordinator {
         self.finish_inject(fx, raw, text, outcome, true);
     }
 
+    /// Non-success injection outcome: hold text for PasteLast, error cue, wire-
+    /// voice copy on the HUD, end session, error dwell.
+    fn inject_error(&mut self, fx: &mut dyn Effects, text: String, label: &str, detail: &str) {
+        self.last_text = Some(text);
+        self.cue(fx, CueKind::Error);
+        self.set_state(fx, HudState::Error { label: label.into(), detail: detail.into() });
+        self.end_session(fx);
+        self.timer = Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+    }
+
     /// Shared injection-outcome handling (finalize + PasteLast).
     /// `record` gates history append (false for re-injects via PasteLast).
     fn finish_inject(
@@ -289,12 +320,15 @@ impl Coordinator {
         outcome: InjectOutcome,
         record: bool,
     ) {
+        // Every arm ends with a held transcription — the tray Paste item enables.
+        fx.set_paste_available(true);
         match outcome {
-            InjectOutcome::Injected { chars } => {
+            InjectOutcome::Injected { chars, method } => {
                 self.last_text = Some(text.clone());
                 if record {
                     let exe = fx.foreground_exe(self.target_hwnd);
-                    fx.append_history(raw, text, exe);
+                    let meta = self.take_meta(method);
+                    fx.append_history(raw, text, exe, meta);
                 }
                 self.set_state(fx, HudState::Injected { chars });
                 self.end_session(fx);
@@ -302,55 +336,23 @@ impl Coordinator {
                     Some((fx.now() + Duration::from_millis(HUD_INJECTED_MS), Timer::HideHud));
             }
             InjectOutcome::ElevatedClipboardOnly => {
-                self.last_text = Some(text);
-                self.cue(fx, CueKind::Error);
-                self.set_state(
-                    fx,
-                    HudState::Error { msg: "TARGET ELEVATED · COPIED".into() },
-                );
-                self.end_session(fx);
-                self.timer =
-                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+                self.inject_error(fx, text, "PROTECTED WINDOW", "SENT TO CLIPBOARD — PASTE IT");
             }
             InjectOutcome::FocusChanged => {
                 // Hold the text; PasteLast re-injects into the now-focused window.
                 // inject() already put it on the clipboard — surface that on the
                 // HUD (no-silent-failure): toast has no UI in v1.
-                self.last_text = Some(text);
-                self.cue(fx, CueKind::Error);
-                self.set_state(
-                    fx,
-                    HudState::Error { msg: "TARGET CHANGED — COPIED TO CLIPBOARD".into() },
-                );
-                self.end_session(fx);
-                self.timer =
-                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+                self.inject_error(fx, text, "WINDOW CHANGED", "SENT TO CLIPBOARD — PASTE IT");
             }
             InjectOutcome::ClipboardManual(t) => {
-                self.last_text = Some(t);
-                self.cue(fx, CueKind::Error);
-                self.set_state(
-                    fx,
-                    HudState::Error { msg: "COPIED TO CLIPBOARD — PASTE MANUALLY".into() },
-                );
-                self.end_session(fx);
-                self.timer =
-                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+                self.inject_error(fx, t, "COULD NOT PRINT", "SENT TO CLIPBOARD — PASTE IT");
             }
             InjectOutcome::ClipboardUnavailable => {
                 // The clipboard write genuinely failed — do NOT claim a copy that
                 // didn't happen (PLAN §1.4). Text survives only in last_text; the
                 // remedy is PasteLast (which retries the write).
-                self.last_text = Some(text);
-                self.cue(fx, CueKind::Error);
-                self.set_state(
-                    fx,
-                    HudState::Error { msg: "CLIPBOARD BUSY — TRY AGAIN".into() },
-                );
                 fx.toast("Clipboard busy — could not copy. Use Paste last to retry.".into());
-                self.end_session(fx);
-                self.timer =
-                    Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
+                self.inject_error(fx, text, "CLIPBOARD BUSY", "PASTE LAST TO RETRY");
             }
         }
     }
@@ -377,18 +379,26 @@ impl Coordinator {
                     crate::types::ModelStatus::Missing => {
                         self.cue(fx, CueKind::Error);
                         fx.show_overlay();
-                        self.set_state(fx, HudState::Error { msg: "MODEL NOT FOUND".into() });
+                        self.set_state(fx, HudState::Error {
+                            label: "NO MODEL".into(),
+                            detail: "OPEN DICTUM TO DOWNLOAD".into(),
+                        });
                         self.timer =
                             Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
                     }
                     crate::types::ModelStatus::Error(m) => {
                         self.cue(fx, CueKind::Error);
                         fx.show_overlay();
-                        self.set_state(fx, HudState::Error { msg: m });
+                        self.set_state(fx, HudState::Error {
+                            label: "MODEL ERROR".into(),
+                            detail: m,
+                        });
                         self.timer =
                             Some((fx.now() + Duration::from_millis(HUD_ERROR_MS), Timer::HideHud));
                     }
-                    _ => self.start_recording(fx, false), // Ready or Loading -> capture anyway
+                    // Ready, Loading, or Unloaded -> capture anyway (no lost words;
+                    // start_recording warms an unloaded model).
+                    _ => self.start_recording(fx, false),
                 }
             }
             // Tray start (explicit toggle command). Not in the edge table but
@@ -442,6 +452,10 @@ impl Coordinator {
                 }
             }
             (State::Recording { .. }, Levels(bars)) => {
+                for b in &bars {
+                    self.level_amps.push(b.amp);
+                    self.take_clipped |= b.clip;
+                }
                 fx.hud(HudEvent::Levels { bars });
             }
             (State::Recording { .. }, SegmentClosed(samples)) => {
@@ -472,8 +486,8 @@ impl Coordinator {
                 } else {
                     // The mic never delivered audio (unplugged before speech, no
                     // device, privacy toggle off) — surface NO MICROPHONE verbatim
-                    // (DESIGN §1.2) + tray error, not a misleading DISCARDED.
-                    self.fail(fx, "NO MICROPHONE", true);
+                    // (DESIGN §5.6) + tray error, not a misleading KILLED.
+                    self.fail(fx, "NO MICROPHONE", "PLUG IN OR PICK ANOTHER INPUT", true);
                 }
             }
             (_, CaptureDead(_)) => {
@@ -497,7 +511,7 @@ impl Coordinator {
                     // utterance and surface the error. fail() bumps the generation,
                     // dropping any sibling in-flight decodes.
                     eprintln!("coordinator: decode failed: {error}");
-                    self.fail(fx, "MODEL NOT FOUND", false);
+                    self.fail(fx, "DECODE FAILED", "NOTHING PRINTED — TRY AGAIN", false);
                 }
             }
 
@@ -531,6 +545,7 @@ impl Coordinator {
     fn on_model_status(&mut self, fx: &mut dyn Effects, st: crate::types::ModelStatus) {
         let became_ready = !self.model_ready() && st == crate::types::ModelStatus::Ready;
         self.model_status = st;
+        fx.announce_model_status(&self.model_status);
         if became_ready {
             // Flush anything queued while the model was loading.
             let queued = std::mem::take(&mut self.decode_queue);
@@ -592,6 +607,25 @@ impl Coordinator {
     fn dbg(&self, what: &str) {
         eprintln!("coordinator: {what} in {:?}", self.state);
     }
+}
+
+/// Peak-preserving downsample of the per-bar amplitude series to ≤ `max` points
+/// (expanded-row trace, DESIGN §5.2). Peaks matter more than means for a level
+/// trace — a clipped syllable must survive the reduction.
+fn downsample_envelope(amps: &[f32], max: usize) -> Vec<f32> {
+    if amps.len() <= max {
+        return amps.to_vec();
+    }
+    (0..max)
+        .map(|i| {
+            let lo = i * amps.len() / max;
+            let hi = ((i + 1) * amps.len() / max).max(lo + 1);
+            amps[lo..hi].iter().cloned().fold(0.0f32, f32::max)
+        })
+        .collect()
+}
+
+impl Coordinator {
 
     // --- Run loop ------------------------------------------------------------
 
@@ -646,6 +680,7 @@ mod tests {
         Toast(String),
         History { raw: String, text: String, exe: Option<String> },
         EscArmed(bool),
+        PasteAvailable(bool),
     }
 
     struct Mock {
@@ -655,6 +690,8 @@ mod tests {
         inject: InjectOutcome,
         // Optional replacement override; None = identity.
         replaced: Option<String>,
+        // Last take metadata passed to append_history.
+        last_meta: Option<TakeMeta>,
     }
 
     impl Mock {
@@ -663,8 +700,9 @@ mod tests {
                 calls: Vec::new(),
                 clock: vec![base],
                 clock_idx: 0,
-                inject: InjectOutcome::Injected { chars: 0 },
+                inject: InjectOutcome::Injected { chars: 0, method: InjectMethod::Pasted },
                 replaced: None,
+                last_meta: None,
             }
         }
         fn with_clock(base: Instant, offsets_ms: &[u64]) -> Self {
@@ -699,7 +737,7 @@ mod tests {
                 HudState::Transcribing => "transcribing".into(),
                 HudState::Injected { chars } => format!("injected:{chars}"),
                 HudState::Cancelled => "cancelled".into(),
-                HudState::Error { msg } => format!("error:{msg}"),
+                HudState::Error { label, detail } => format!("error:{label} / {detail}"),
                 HudState::ConfirmDiscard => "confirm".into(),
             },
         }
@@ -756,14 +794,18 @@ mod tests {
         fn foreground_exe(&mut self, _hwnd: isize) -> Option<String> {
             Some("editor.exe".into())
         }
-        fn append_history(&mut self, raw: String, text: String, exe: Option<String>) {
+        fn append_history(&mut self, raw: String, text: String, exe: Option<String>, meta: TakeMeta) {
             self.calls.push(Call::History { raw, text, exe });
+            self.last_meta = Some(meta);
         }
         fn apply_replacements(&mut self, raw: &str) -> String {
             self.replaced.clone().unwrap_or_else(|| raw.to_string())
         }
         fn set_esc_armed(&mut self, armed: bool) {
             self.calls.push(Call::EscArmed(armed));
+        }
+        fn set_paste_available(&mut self, on: bool) {
+            self.calls.push(Call::PasteAvailable(on));
         }
         fn now(&mut self) -> Instant {
             let v = self.clock[self.clock_idx.min(self.clock.len() - 1)];
@@ -788,7 +830,7 @@ mod tests {
         let base = Instant::now();
         let mut fx = Mock::with_clock(base, &[0, 600]); // down @0, up @600 (>400 = hold)
         let mut c = Coordinator::new(cfg(HotkeyMode::Both));
-        fx.inject = InjectOutcome::Injected { chars: 5 };
+        fx.inject = InjectOutcome::Injected { chars: 5, method: InjectMethod::Pasted };
 
         c.handle(CoordMsg::HotkeyDown, &mut fx);
         assert!(fx.has(&Call::ShowOverlay));
@@ -942,7 +984,7 @@ mod tests {
         c.model_status = ModelStatus::Missing;
 
         c.handle(CoordMsg::HotkeyDown, &mut fx);
-        assert_eq!(fx.huds().last().unwrap(), "error:MODEL NOT FOUND");
+        assert_eq!(fx.huds().last().unwrap(), "error:NO MODEL / OPEN DICTUM TO DOWNLOAD");
         assert!(fx.has(&Call::Cue(CueKind::Error)));
         assert!(!fx.calls.iter().any(|x| matches!(x, Call::StartCapture(_))));
         assert!(matches!(c.state, State::Idle));
@@ -981,7 +1023,7 @@ mod tests {
         // (DESIGN §1.2 verbatim) + tray error, not a misleading DISCARDED.
         c.handle(CoordMsg::CaptureDead("no input device".into()), &mut fx);
         assert!(fx.has(&Call::Cue(CueKind::Error)));
-        assert_eq!(fx.huds().last().unwrap(), "error:NO MICROPHONE");
+        assert_eq!(fx.huds().last().unwrap(), "error:NO MICROPHONE / PLUG IN OR PICK ANOTHER INPUT");
         assert!(fx.has(&Call::TrayError));
         assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
         assert!(matches!(c.state, State::Idle));
@@ -1004,7 +1046,7 @@ mod tests {
 
         // No partial inject of the successful segment; an honest error instead.
         assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
-        assert_eq!(fx.huds().last().unwrap(), "error:MODEL NOT FOUND");
+        assert_eq!(fx.huds().last().unwrap(), "error:DECODE FAILED / NOTHING PRINTED — TRY AGAIN");
         assert!(fx.has(&Call::Cue(CueKind::Error)));
         assert!(matches!(c.state, State::Idle));
     }
@@ -1165,12 +1207,13 @@ mod tests {
         assert!(fx
             .huds()
             .iter()
-            .any(|h| h.contains("TARGET CHANGED — COPIED TO CLIPBOARD")));
+            .any(|h| h.contains("WINDOW CHANGED / SENT TO CLIPBOARD — PASTE IT")));
         assert_eq!(c.last_text.as_deref(), Some("held text"));
         assert!(matches!(c.state, State::Idle));
+        assert!(fx.has(&Call::PasteAvailable(true)));
 
         // PasteLast now succeeds into the refocused window.
-        fx.inject = InjectOutcome::Injected { chars: 9 };
+        fx.inject = InjectOutcome::Injected { chars: 9, method: InjectMethod::Pasted };
         c.handle(CoordMsg::PasteLast, &mut fx);
         assert!(fx.has(&Call::Inject("held text".into())));
         assert_eq!(fx.huds().last().unwrap(), "injected:9");
@@ -1189,7 +1232,7 @@ mod tests {
         c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
         c.handle(CoordMsg::DecodeDone { generation: g, text: "x".into() }, &mut fx);
 
-        assert_eq!(fx.huds().last().unwrap(), "error:TARGET ELEVATED · COPIED");
+        assert_eq!(fx.huds().last().unwrap(), "error:PROTECTED WINDOW / SENT TO CLIPBOARD — PASTE IT");
         assert!(fx.has(&Call::Cue(CueKind::Error)));
     }
 
@@ -1214,5 +1257,65 @@ mod tests {
         c.handle(CoordMsg::HotkeyDown, &mut fx);
         c.handle(CoordMsg::Levels(vec![LevelBar { amp: 0.5, clip: false }]), &mut fx);
         assert!(fx.huds().iter().any(|h| h == "levels:1"));
+    }
+
+    #[test]
+    fn take_metadata_recorded_with_history() {
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0, 600]);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        fx.inject = InjectOutcome::Injected { chars: 4, method: InjectMethod::Typed };
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        // 4 bars = 150ms of audio, one clipped.
+        c.handle(
+            CoordMsg::Levels(vec![
+                LevelBar { amp: 0.2, clip: false },
+                LevelBar { amp: 0.9, clip: true },
+                LevelBar { amp: 0.4, clip: false },
+                LevelBar { amp: 0.1, clip: false },
+            ]),
+            &mut fx,
+        );
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "test".into() }, &mut fx);
+
+        let meta = fx.last_meta.as_ref().expect("history appended with meta");
+        assert_eq!(meta.dur_ms, 150); // 4 × 37.5ms
+        assert!(meta.clipped);
+        assert_eq!(meta.envelope, vec![0.2, 0.9, 0.4, 0.1]);
+        assert_eq!(meta.method, Some(InjectMethod::Typed));
+        assert!(fx.has(&Call::PasteAvailable(true)));
+    }
+
+    #[test]
+    fn downsample_envelope_preserves_peaks() {
+        // Short series passes through untouched.
+        assert_eq!(downsample_envelope(&[0.1, 0.2], 64), vec![0.1, 0.2]);
+        // 8 -> 4 buckets of 2, each keeping its max.
+        let out = downsample_envelope(&[0.1, 0.9, 0.2, 0.3, 0.8, 0.1, 0.0, 0.5], 4);
+        assert_eq!(out, vec![0.9, 0.3, 0.8, 0.5]);
+        // Length is capped at `max`.
+        let long: Vec<f32> = (0..1000).map(|i| (i % 10) as f32 / 10.0).collect();
+        assert_eq!(downsample_envelope(&long, 64).len(), 64);
+    }
+
+    #[test]
+    fn unloaded_model_warms_on_start() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(Config {
+            hotkey_mode: HotkeyMode::Hold,
+            unload_on_idle: true,
+            ..Default::default()
+        });
+        // asr announced the unload; the next take must warm the model.
+        c.handle(CoordMsg::ModelStatus(ModelStatus::Unloaded), &mut fx);
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        assert!(fx.has(&Call::EnsureModel));
+        assert!(fx.has(&Call::StartCapture(None))); // capture starts in parallel
     }
 }

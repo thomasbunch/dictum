@@ -5,7 +5,8 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::types::{
-    Config, CoordMsg, DownloadProgress, HistoryRecord, HudEvent, ModelInfo, ModelStatus, Replacement,
+    Config, CoordMsg, DownloadProgress, HistoryRecord, HudEvent, ModelInfo, ModelStatus,
+    ModelStatusDto, Replacement,
 };
 use crate::AppState;
 
@@ -77,15 +78,27 @@ pub fn history_undo_delete(state: State<AppState>) {
     let _ = state.history.lock().unwrap().undo_delete();
 }
 
+/// Total tape line count (list() is capped at 500; the toolbar meta needs all).
 #[tauri::command]
-pub fn history_meta(state: State<AppState>) -> String {
-    let cfg = state.config.lock().unwrap().clone();
-    state.history.lock().unwrap().meta_line(&cfg)
+pub fn history_count(state: State<AppState>) -> i64 {
+    state.history.lock().unwrap().count()
 }
 
 #[tauri::command]
 pub fn paste_last(state: State<AppState>) {
     let _ = state.coord_tx.lock().unwrap().send(CoordMsg::PasteLast);
+}
+
+/// Masthead keycaps: start/stop a test dictation (DESIGN §5.1).
+#[tauri::command]
+pub fn toggle_dictation(state: State<AppState>) {
+    let _ = state.coord_tx.lock().unwrap().send(CoordMsg::ToggleDictation);
+}
+
+/// Boot-time model status for the SETUP card; live updates on `model://status`.
+#[tauri::command]
+pub fn get_model_status(state: State<AppState>) -> ModelStatusDto {
+    state.model_status.lock().unwrap().clone()
 }
 
 #[tauri::command]

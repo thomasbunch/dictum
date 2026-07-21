@@ -63,7 +63,33 @@ pub enum ModelStatus {
     Missing,
     Loading { pct: u8 },
     Ready,
+    /// Model files present but the recognizer was dropped (unload_on_idle).
+    Unloaded,
     Error(String),
+}
+
+/// Wire form of `ModelStatus` for the main window (SETUP model card, masthead
+/// status line). Emitted on `model://status`; read via `get_model_status`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "k", rename_all = "snake_case")]
+pub enum ModelStatusDto {
+    Missing,
+    Loading { pct: u8 },
+    Ready,
+    Unloaded,
+    Error { msg: String },
+}
+
+impl From<&ModelStatus> for ModelStatusDto {
+    fn from(s: &ModelStatus) -> Self {
+        match s {
+            ModelStatus::Missing => Self::Missing,
+            ModelStatus::Loading { pct } => Self::Loading { pct: *pct },
+            ModelStatus::Ready => Self::Ready,
+            ModelStatus::Unloaded => Self::Unloaded,
+            ModelStatus::Error(m) => Self::Error { msg: m.clone() },
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -90,9 +116,9 @@ pub enum HudState {
     Transcribing,
     Injected { chars: u32 },
     Cancelled,
-    /// `msg` is the exact tracked-caps copy from DESIGN.md §1.2.
-    Error { msg: String },
-    /// Recording > 30 s and Esc pressed once: "ESC AGAIN TO DISCARD".
+    /// `label` + `detail` are the exact wire-voice copy from DESIGN.md §5.6/§6.
+    Error { label: String, detail: String },
+    /// Recording > 30 s and Esc pressed once: HOLD ON / ESC AGAIN KILLS THE TAKE.
     ConfirmDiscard,
 }
 
@@ -134,7 +160,7 @@ impl Default for Config {
             input_device: None,
             audio_cues: true,
             unload_on_idle: false,
-            theme: Theme::Ledger,
+            theme: Theme::Bone,
             keep_transcripts: true,
             retention: Retention::Days7,
             vocabulary: Vec::new(),
@@ -162,7 +188,15 @@ pub enum HotkeyMode { Hold, Toggle, Both }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "UPPERCASE")]
-pub enum Theme { Ledger, Bone, Plaster, Glacier, Lilac, Obsidian }
+pub enum Theme {
+    /// PLASTER was retired in the TAPE redesign; old configs map to BONE.
+    #[serde(alias = "PLASTER")]
+    Bone,
+    Ledger,
+    Glacier,
+    Lilac,
+    Obsidian,
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -197,10 +231,16 @@ pub enum PasteShortcut { CtrlV, CtrlShiftV }
 // Injection
 // ---------------------------------------------------------------------------
 
+/// How injected text physically reached the target (TAPE expanded row:
+/// `PRINTED TO <exe> · <TYPED|PASTED> · <n> CHARS`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum InjectMethod { Pasted, Typed }
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum InjectOutcome {
     /// Text landed via clipboard-paste or SendInput fallback.
-    Injected { chars: u32 },
+    Injected { chars: u32, method: InjectMethod },
     /// Target elevated (UIPI): text copied to clipboard only.
     ElevatedClipboardOnly,
     /// Foreground window changed since hotkey-down: text held, not pasted.
@@ -226,8 +266,26 @@ pub struct HistoryRecord {
     pub raw: String,
     /// Final injected text.
     pub text: String,
-    /// Focused exe name at injection, e.g. "chrome.exe" (future per-app modes).
+    /// Focused exe name at injection, e.g. "chrome.exe" (per-app column/stats).
     pub exe: Option<String>,
+    /// Take length in ms (bar count × 37.5). 0 for pre-TAPE rows.
+    pub dur_ms: i64,
+    /// Any bar in the take hit >= -1 dBFS.
+    pub clipped: bool,
+    /// Downsampled amplitude envelope (≤ 64 points, 0.0..=1.0) for the
+    /// expanded-row trace. Empty for pre-TAPE rows.
+    pub envelope: Vec<f32>,
+    /// "pasted" | "typed". None for pre-TAPE rows.
+    pub method: Option<String>,
+}
+
+/// Per-take metadata captured by the coordinator, stored with the record.
+#[derive(Debug, Clone, Default)]
+pub struct TakeMeta {
+    pub dur_ms: i64,
+    pub clipped: bool,
+    pub envelope: Vec<f32>,
+    pub method: Option<InjectMethod>,
 }
 
 // ---------------------------------------------------------------------------
