@@ -62,9 +62,14 @@ export function retentionLabel(r: Retention): string {
   return { keepNothing: "NOTHING", hours24: "24 H", days7: "7 D", days30: "30 D", forever: "FOREVER" }[r];
 }
 
+/** The model the config points at (falls back to the first registry entry). */
+export function activeModel(c: Ctx): ModelInfo | undefined {
+  return c.models.find((m) => m.id === c.config?.modelId) ?? c.models[0];
+}
+
 /** Download flow states (§5.4.3), reused by the first-run masthead and the
- * SETUP model card. Renders into `slot`; calls onDone after READY. */
-export function runDownloadFlow(slot: HTMLElement, sizeMb: number, onDone: () => void): void {
+ * SETUP model cards. Renders into `slot`; calls onDone after READY. */
+export function runDownloadFlow(id: string, slot: HTMLElement, sizeMb: number, onDone: () => void): void {
   let mbDone = 0;
   const left = h("span");
   const right = h("span");
@@ -80,7 +85,7 @@ export function runDownloadFlow(slot: HTMLElement, sizeMb: number, onDone: () =>
     bar.className = "dl-bar";
     fill.style.transform = "scaleX(0)";
     api
-      .downloadModel("parakeet-tdt-0.6b-v2-int8", (p) => {
+      .downloadModel(id, (p) => {
         if (p.t === "progress") {
           mbDone = p.mb_done;
           right.textContent = `${p.pct}% OF ${p.mb_total} MB`;
@@ -161,7 +166,7 @@ const ctx: Ctx = {
 function statusLine(): string {
   const model = (() => {
     switch (ctx.modelStatus.k) {
-      case "ready": return `MODEL LOADED · ${ctx.models[0]?.display ?? "PARAKEET-TDT 0.6B V2"}`;
+      case "ready": return `MODEL LOADED · ${activeModel(ctx)?.display ?? "PARAKEET-TDT 0.6B V2"}`;
       case "loading": return `MODEL LOADING · ${ctx.modelStatus.pct}%`;
       case "unloaded": return "MODEL NOT LOADED (IDLE)";
       case "missing": return "NO MODEL ON THIS MACHINE";
@@ -286,13 +291,15 @@ function renderMasthead(): void {
   const present = ctx.models[0]?.present ?? false;
   if (!present) {
     // First run (§5.5): the masthead carries the fetch.
-    const sizeMb = ctx.models[0]?.sizeMb ?? 610;
+    const active = activeModel(ctx);
+    const sizeMb = active?.sizeMb ?? 610;
     const slot = h("div");
     const btn = h(
       "button",
       {
         class: "btn fetch-btn",
-        onclick: () => runDownloadFlow(slot, sizeMb, () => void refreshModel()),
+        onclick: () =>
+          runDownloadFlow(active?.id ?? "parakeet-tdt-0.6b-v2-int8", slot, sizeMb, () => void refreshModel()),
       },
       `FETCH THE MODEL · ${sizeMb} MB`,
     );
@@ -302,7 +309,7 @@ function renderMasthead(): void {
         h("div", { class: "firstrun" }, [
           slot,
           h("div", { class: "value-sm note" }, [
-            `${ctx.models[0]?.display ?? "PARAKEET-TDT 0.6B V2"} · SHERPA-ONNX · CPU`,
+            `${active?.display ?? "PARAKEET-TDT 0.6B V2"} · SHERPA-ONNX · CPU`,
             h("br"),
             "THE ONLY DOWNLOAD DICTUM WILL EVER MAKE. AFTER THIS, THE WIRE GOES DARK.",
           ]),

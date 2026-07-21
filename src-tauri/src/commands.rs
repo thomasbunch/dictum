@@ -42,21 +42,23 @@ pub fn list_input_devices() -> Vec<String> {
 
 #[tauri::command]
 pub fn model_info() -> Vec<ModelInfo> {
-    vec![crate::model::check()] // single model SKU in v1
+    crate::model::MODELS.iter().map(crate::model::check).collect()
 }
 
 #[tauri::command]
 pub fn download_model(id: String, progress: Channel<DownloadProgress>, state: State<AppState>) {
-    let _ = id; // single model SKU in v1
+    let spec = crate::model::spec(&id);
     let tx = state.coord_tx.lock().unwrap().clone();
+    let active = state.config.lock().unwrap().model_id == spec.id;
     // Blocking download (the app's only network path) — off the IPC thread.
     // On completion, tell the coordinator the model is usable (recognizer
-    // lazy-loads on first decode via asr::ensure).
+    // lazy-loads on first decode via asr::ensure) — but only if the download
+    // was for the ACTIVE model; fetching the other SKU changes nothing live.
     std::thread::spawn(move || {
-        crate::model::download(move |p| {
+        crate::model::download(spec, move |p| {
             let done = matches!(p, DownloadProgress::Done);
             let _ = progress.send(p);
-            if done {
+            if done && active {
                 let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Ready));
             }
         });

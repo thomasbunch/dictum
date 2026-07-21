@@ -57,11 +57,16 @@ pub trait Effects {
     /// Exe file name owning `hwnd`, for the history per-app column (PLAN §9).
     fn foreground_exe(&mut self, hwnd: isize) -> Option<String>;
     fn append_history(&mut self, raw: String, text: String, exe: Option<String>, meta: TakeMeta);
-    fn apply_replacements(&mut self, raw: &str) -> String;
+    /// Post-ASR transforms: replacements + file tagging. `target_hwnd` is the
+    /// window captured at hotkey-down (file-tag root auto-pick reads its title).
+    fn apply_replacements(&mut self, raw: &str, target_hwnd: isize) -> String;
     fn set_esc_armed(&mut self, armed: bool);
     /// Model status changed — surface to the main window (SETUP model card,
     /// masthead status line). Default no-op keeps test mocks small.
     fn announce_model_status(&mut self, _st: &ModelStatus) {}
+    /// Config switched the active model SKU — the ASR worker drops the old
+    /// recognizer and future loads use the new id. Default no-op for mocks.
+    fn set_model(&mut self, _id: String) {}
     /// A transcription is now held for PasteLast — the tray menu item enables.
     fn set_paste_available(&mut self, _on: bool) {}
     fn now(&mut self) -> Instant;
@@ -286,7 +291,7 @@ impl Coordinator {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = fx.apply_replacements(&raw);
+        let text = fx.apply_replacements(&raw, self.target_hwnd);
 
         if text.trim().is_empty() {
             // Nothing was said (or all filtered) — treat as a discard, no cue.
@@ -518,6 +523,16 @@ impl Coordinator {
             // ---- Model / config / system -------------------------------------
             (_, ModelStatus(st)) => self.on_model_status(fx, st),
             (_, ConfigChanged(c)) => {
+                if c.model_id != self.cfg.model_id {
+                    // Switch SKUs: drop the old recognizer, then warm the new
+                    // one unless the user runs unload-on-idle (it would load
+                    // lazily on the next take either way; ensure() surfaces
+                    // Missing if the files aren't on disk yet).
+                    fx.set_model(c.model_id.clone());
+                    if !c.unload_on_idle {
+                        fx.ensure_model();
+                    }
+                }
                 self.cfg = c;
             }
             (_, SystemResumed) => {
@@ -681,6 +696,7 @@ mod tests {
         History { raw: String, text: String, exe: Option<String> },
         EscArmed(bool),
         PasteAvailable(bool),
+        SetModel(String),
     }
 
     struct Mock {
@@ -798,7 +814,7 @@ mod tests {
             self.calls.push(Call::History { raw, text, exe });
             self.last_meta = Some(meta);
         }
-        fn apply_replacements(&mut self, raw: &str) -> String {
+        fn apply_replacements(&mut self, raw: &str, _target_hwnd: isize) -> String {
             self.replaced.clone().unwrap_or_else(|| raw.to_string())
         }
         fn set_esc_armed(&mut self, armed: bool) {
@@ -806,6 +822,9 @@ mod tests {
         }
         fn set_paste_available(&mut self, on: bool) {
             self.calls.push(Call::PasteAvailable(on));
+        }
+        fn set_model(&mut self, id: String) {
+            self.calls.push(Call::SetModel(id));
         }
         fn now(&mut self) -> Instant {
             let v = self.clock[self.clock_idx.min(self.clock.len() - 1)];
@@ -1234,6 +1253,35 @@ mod tests {
 
         assert_eq!(fx.huds().last().unwrap(), "error:PROTECTED WINDOW / SENT TO CLIPBOARD — PASTE IT");
         assert!(fx.has(&Call::Cue(CueKind::Error)));
+    }
+
+    #[test]
+    fn model_switch_reloads_recognizer() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut new_cfg = cfg(HotkeyMode::Hold);
+        new_cfg.model_id = "parakeet-tdt-0.6b-v3-int8".into();
+        c.handle(CoordMsg::ConfigChanged(new_cfg.clone()), &mut fx);
+        assert!(fx.has(&Call::SetModel("parakeet-tdt-0.6b-v3-int8".into())));
+        assert!(fx.has(&Call::EnsureModel)); // warm the new SKU (default config)
+        // Same config again: no redundant switch.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(new_cfg), &mut fx);
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::SetModel(_))));
+    }
+
+    #[test]
+    fn model_switch_with_unload_on_idle_stays_cold() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut new_cfg = cfg(HotkeyMode::Hold);
+        new_cfg.model_id = "parakeet-tdt-0.6b-v3-int8".into();
+        new_cfg.unload_on_idle = true;
+        c.handle(CoordMsg::ConfigChanged(new_cfg), &mut fx);
+        assert!(fx.has(&Call::SetModel("parakeet-tdt-0.6b-v3-int8".into())));
+        assert!(!fx.has(&Call::EnsureModel)); // lazy-loads on the next take
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod audio;
 mod commands;
 mod config;
 mod coordinator;
+mod filetag;
 mod history;
 mod hotkey;
 mod inject;
@@ -68,6 +69,9 @@ struct RealEffects {
     config: Arc<Mutex<Config>>,
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
     model_status: Arc<Mutex<ModelStatusDto>>,
+    /// FILE TAG index over config.project_roots; rebuilt in the background at
+    /// every session start (capture_foreground), read at apply_replacements.
+    file_index: Arc<Mutex<filetag::Index>>,
     /// Last click-through value pushed to the overlay (avoid a main-thread hop
     /// per HUD state when nothing changed).
     overlay_click_through: bool,
@@ -85,6 +89,19 @@ fn cue_to_audio(k: CueKind) -> Cue {
 
 impl Effects for RealEffects {
     fn start_capture(&mut self, device: Option<String>) {
+        // Refresh the FILE TAG index while the take records — the walk is
+        // ms-scale and decode is seconds away. Lives here (not in
+        // capture_foreground) so PasteLast never triggers a pointless walk.
+        // ponytail: rebuild-per-session, no watcher; add notify-debounce only
+        // if huge roots make this measurably late.
+        let roots = self.config.lock().unwrap().project_roots.clone();
+        if !roots.is_empty() {
+            let idx = self.file_index.clone();
+            std::thread::spawn(move || {
+                let built = filetag::Index::build(&roots);
+                *idx.lock().unwrap() = built;
+            });
+        }
         self.audio.start(device);
     }
     fn stop_capture(&mut self) {
@@ -163,9 +180,14 @@ impl Effects for RealEffects {
         // The main window (if open) prints the new line on arrival (§5.2).
         let _ = self.app.emit("history://changed", ());
     }
-    fn apply_replacements(&mut self, raw: &str) -> String {
+    fn apply_replacements(&mut self, raw: &str, target_hwnd: isize) -> String {
         let cfg = self.config.lock().unwrap().clone();
-        crate::replacements::apply(raw, &cfg)
+        let text = crate::replacements::apply(raw, &cfg);
+        if cfg.project_roots.is_empty() {
+            return text;
+        }
+        let title = filetag::window_title(target_hwnd);
+        filetag::apply(&text, &self.file_index.lock().unwrap(), title.as_deref())
     }
     fn set_esc_armed(&mut self, armed: bool) {
         let _ = self.hotkey.lock().unwrap().arm_esc(armed);
@@ -177,6 +199,9 @@ impl Effects for RealEffects {
     }
     fn set_paste_available(&mut self, on: bool) {
         self.tray.set_paste_enabled(on);
+    }
+    fn set_model(&mut self, id: String) {
+        self.asr.set_model(id);
     }
     fn now(&mut self) -> Instant {
         Instant::now()
@@ -238,7 +263,7 @@ pub fn run() {
             let vad_path = res_dir.join("silero_vad.onnx");
 
             let audio = audio::AudioPipeline::new(tx.clone(), vad_path);
-            let asr = asr::AsrEngine::new(tx.clone());
+            let asr = asr::AsrEngine::new(tx.clone(), init_cfg.model_id.clone());
             let cues = audio::Cues::new(&res_dir, init_cfg.audio_cues);
             let history = Arc::new(Mutex::new(
                 history::History::open(&init_cfg).expect("open history.db"),
@@ -262,7 +287,8 @@ pub fn run() {
                 }
             };
             let hotkey = Arc::new(Mutex::new(hotkey_mgr));
-            let model_status = Arc::new(Mutex::new(if model::model_files().all_present() {
+            let active_spec = model::spec(&init_cfg.model_id);
+            let model_status = Arc::new(Mutex::new(if model::model_files(active_spec).all_present() {
                 ModelStatusDto::Loading { pct: 0 }
             } else {
                 ModelStatusDto::Missing
@@ -277,19 +303,22 @@ pub fn run() {
                 model_status: model_status.clone(),
             });
 
-            // Warm the model unless it's missing (missing -> first hotkey shows
-            // MODEL NOT FOUND, Settings shows GET). ensure_loaded() is a non-
-            // blocking channel send; the asr worker thread does the real load.
-            if model::model_files().all_present() {
+            // Warm the active model unless it's missing (missing -> first hotkey
+            // shows MODEL NOT FOUND, Settings shows GET). ensure_loaded() is a
+            // non-blocking channel send; the asr worker thread does the real load.
+            if model::model_files(active_spec).all_present() {
                 asr.ensure_loaded();
             } else if let Some(archive) = model::find_dropped_archive() {
                 // Offline sideload (PLAN §4.4): a hand-dropped .tar.bz2 in the
-                // models dir installs on a background thread (600 MB extract),
-                // then warm-loads.
+                // models dir installs on a background thread (600 MB extract) —
+                // the archive's checksums decide which SKU it is. Warm-load only
+                // if it turned out to be the active one.
                 let asr2 = asr.clone();
                 let tx2 = tx.clone();
+                let active_id = init_cfg.model_id.clone();
                 std::thread::spawn(move || match model::install_from_archive(&archive) {
-                    Ok(()) => asr2.ensure_loaded(),
+                    Ok(spec) if spec.id == active_id => asr2.ensure_loaded(),
+                    Ok(_) => {} // other SKU installed; SETUP shows it present
                     Err(e) => {
                         eprintln!("sideload install failed: {e}");
                         let _ = tx2.send(CoordMsg::ModelStatus(ModelStatus::Missing));
@@ -297,6 +326,14 @@ pub fn run() {
                 });
             } else {
                 let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Missing));
+            }
+
+            // FILE TAG index: warm it once at boot so the first take can tag.
+            let file_index = Arc::new(Mutex::new(filetag::Index::default()));
+            if !init_cfg.project_roots.is_empty() {
+                let idx = file_index.clone();
+                let roots = init_cfg.project_roots.clone();
+                std::thread::spawn(move || *idx.lock().unwrap() = filetag::Index::build(&roots));
             }
 
             let mut fx = RealEffects {
@@ -310,6 +347,7 @@ pub fn run() {
                 config,
                 hotkey: hotkey.clone(),
                 model_status,
+                file_index,
                 overlay_click_through: true, // overlay::setup made it click-through
             };
             std::thread::spawn(move || {
@@ -369,11 +407,12 @@ mod e2e {
         use std::sync::atomic::{AtomicBool, Ordering};
         use std::time::Instant;
 
-        let files = crate::model::model_files();
+        let spec = crate::model::spec(crate::model::DEFAULT_MODEL_ID);
+        let files = crate::model::model_files(spec);
         if !files.all_present() {
             eprintln!("model absent — downloading via model::download()");
             let failed = AtomicBool::new(false);
-            crate::model::download(|p| match &p {
+            crate::model::download(spec, |p| match &p {
                 DownloadProgress::Progress { pct, mb_done, mb_total } => {
                     if pct % 5 == 0 {
                         eprintln!("  {pct}% ({mb_done}/{mb_total} MB)");
@@ -388,7 +427,7 @@ mod e2e {
             });
             assert!(!failed.load(Ordering::SeqCst), "model download failed");
         }
-        let files = crate::model::model_files();
+        let files = crate::model::model_files(spec);
         assert!(files.all_present(), "model files missing after download");
 
         // Same construction as asr.rs (kept in sync by the review suite).
@@ -406,7 +445,7 @@ mod e2e {
         let rec = sherpa_onnx::OfflineRecognizer::create(&cfg).expect("recognizer create");
         eprintln!("model load: {:.1}s", load_start.elapsed().as_secs_f32());
 
-        let wav = crate::model::model_dir().join("test_wavs").join("0.wav");
+        let wav = crate::model::model_dir(spec).join("test_wavs").join("0.wav");
         assert!(wav.exists(), "bundled test wav missing: {}", wav.display());
         let wave =
             sherpa_onnx::Wave::read(wav.to_string_lossy().as_ref()).expect("read test wav");
@@ -424,5 +463,55 @@ mod e2e {
         eprintln!("audio {audio_secs:.2}s  decode {decode:.3}s  RTF {rtf:.4}");
         assert!(!text.trim().is_empty(), "empty transcript from test wav");
         assert!(rtf < 1.0, "RTF {rtf} ≥ 1.0 — misses the latency budget");
+    }
+
+    /// Multilingual SKU (Parakeet v3): decode the archive's bundled de/en/es/fr
+    /// WAVs through the registry path — proves model switch + auto language
+    /// detection end to end. Requires the v3 model installed (download via
+    /// SETUP or sideload); skips with a message when absent.
+    /// Run: cargo test --release -- --ignored v3_multilingual
+    #[test]
+    #[ignore]
+    fn v3_multilingual_decode() {
+        use std::time::Instant;
+
+        let spec = crate::model::spec("parakeet-tdt-0.6b-v3-int8");
+        let files = crate::model::model_files(spec);
+        if !files.all_present() {
+            eprintln!("v3 model not installed — skipping (fetch it via SETUP first)");
+            return;
+        }
+
+        let mut cfg = sherpa_onnx::OfflineRecognizerConfig::default();
+        cfg.model_config.transducer = sherpa_onnx::OfflineTransducerModelConfig {
+            encoder: Some(files.encoder.to_string_lossy().into_owned()),
+            decoder: Some(files.decoder.to_string_lossy().into_owned()),
+            joiner: Some(files.joiner.to_string_lossy().into_owned()),
+        };
+        cfg.model_config.tokens = Some(files.tokens.to_string_lossy().into_owned());
+        cfg.model_config.provider = Some("cpu".into());
+        cfg.model_config.num_threads = 4;
+
+        let load_start = Instant::now();
+        let rec = sherpa_onnx::OfflineRecognizer::create(&cfg).expect("v3 recognizer create");
+        eprintln!("v3 load: {:.1}s", load_start.elapsed().as_secs_f32());
+
+        for lang in ["de", "en", "es", "fr"] {
+            let wav = crate::model::model_dir(spec).join("test_wavs").join(format!("{lang}.wav"));
+            assert!(wav.exists(), "bundled {lang}.wav missing: {}", wav.display());
+            let wave = sherpa_onnx::Wave::read(wav.to_string_lossy().as_ref()).expect("read wav");
+            let audio_secs = wave.num_samples() as f32 / wave.sample_rate() as f32;
+
+            let t = Instant::now();
+            let stream = rec.create_stream();
+            stream.accept_waveform(wave.sample_rate(), wave.samples());
+            rec.decode(&stream);
+            let text = stream.get_result().map(|r| r.text).unwrap_or_default();
+            let rtf = t.elapsed().as_secs_f32() / audio_secs;
+
+            eprintln!("[{lang}] RTF {rtf:.4} — {text}");
+            assert!(!text.trim().is_empty(), "empty transcript for {lang}.wav");
+            assert!(rtf < 1.0, "[{lang}] RTF {rtf} ≥ 1.0 — misses the latency budget");
+        }
     }
 }

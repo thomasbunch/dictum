@@ -13,6 +13,9 @@ enum AsrCmd {
     EnsureLoaded,
     Decode { generation: u64, samples: Vec<f32> },
     Unload,
+    /// Switch the active model (config model_id). Drops the loaded recognizer
+    /// if the id differs; the next EnsureLoaded/Decode loads the new files.
+    SetModel(String),
 }
 
 /// Handle held by the coordinator. Every method is fire-and-forget; replies
@@ -23,10 +26,15 @@ pub struct AsrEngine {
 }
 
 impl AsrEngine {
-    pub fn new(coord_tx: Sender<CoordMsg>) -> Self {
+    pub fn new(coord_tx: Sender<CoordMsg>, model_id: String) -> Self {
         let (tx, rx) = channel();
-        thread::spawn(move || run(rx, coord_tx));
+        thread::spawn(move || run(rx, coord_tx, model_id));
         AsrEngine { tx }
+    }
+
+    /// Switch the active model SKU (SETUP model picker).
+    pub fn set_model(&self, id: String) {
+        let _ = self.tx.send(AsrCmd::SetModel(id));
     }
 
     /// Warm-load the model (emits Loading{0/50/100} -> Ready, or Missing/Error).
@@ -46,7 +54,7 @@ impl AsrEngine {
     }
 }
 
-fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>) {
+fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>, mut model_id: String) {
     let mut rec: Option<OfflineRecognizer> = None;
     // Loop ends when the handle is dropped (channel closed) -> recognizer freed.
     while let Ok(cmd) = rx.recv() {
@@ -55,7 +63,7 @@ fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>) {
                 if rec.is_some() {
                     let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Ready));
                 } else {
-                    ensure(&mut rec, &tx);
+                    ensure(&mut rec, &tx, &model_id);
                 }
             }
             AsrCmd::Decode { generation, samples } => {
@@ -63,7 +71,7 @@ fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>) {
                     let _ = tx.send(CoordMsg::DecodeDone { generation, text: String::new() });
                     continue;
                 }
-                if !ensure(&mut rec, &tx) {
+                if !ensure(&mut rec, &tx, &model_id) {
                     let _ = tx.send(CoordMsg::DecodeFailed {
                         generation,
                         error: "model not loaded".into(),
@@ -79,13 +87,22 @@ fn run(rx: Receiver<AsrCmd>, tx: Sender<CoordMsg>) {
                 // and SETUP can print "○ IDLE — UNLOADED".
                 let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Unloaded));
             }
+            AsrCmd::SetModel(id) => {
+                if id != model_id {
+                    model_id = id;
+                    // Drop the old recognizer (frees ~600 MB); the caller decides
+                    // whether to warm the new one (ensure_model follows unless
+                    // unload_on_idle). No status here — ensure() reports.
+                    rec = None;
+                }
+            }
         }
     }
 }
 
 /// Load the recognizer if absent. Emits the coarse status flow and returns
 /// whether a recognizer is available afterwards.
-fn ensure(rec: &mut Option<OfflineRecognizer>, tx: &Sender<CoordMsg>) -> bool {
+fn ensure(rec: &mut Option<OfflineRecognizer>, tx: &Sender<CoordMsg>, model_id: &str) -> bool {
     if rec.is_some() {
         return true;
     }
@@ -93,7 +110,7 @@ fn ensure(rec: &mut Option<OfflineRecognizer>, tx: &Sender<CoordMsg>) -> bool {
         let _ = tx.send(CoordMsg::ModelStatus(s));
     };
     status(ModelStatus::Loading { pct: 0 });
-    let files = model::model_files();
+    let files = model::model_files(model::spec(model_id));
     if !files.all_present() {
         status(ModelStatus::Missing);
         return false;

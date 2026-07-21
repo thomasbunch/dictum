@@ -1,6 +1,6 @@
 [package]
 name = "dictum"
-version = "0.1.0"
+version = "0.2.0"
 description = "Local, CPU-only, push-to-talk dictation for Windows"
 license = "Apache-2.0"
 edition = "2021"
@@ -62,6 +62,9 @@ bzip2 = "0.4"
 
 # Replacements
 regex = "1"
+
+# File tagging (gitignore-aware project walk)
+ignore = "0.4"
 
 [profile.release]
 lto = "thin"

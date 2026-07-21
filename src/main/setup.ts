@@ -201,61 +201,80 @@ function buildInputSection(ctx: Ctx): HTMLElement {
 // MODEL (§5.4.3)
 // ---------------------------------------------------------------------------
 function buildModelSection(ctx: Ctx): HTMLElement {
-  const name = h("span", { class: "name" }, ctx.models[0]?.display ?? "PARAKEET-TDT 0.6B V2");
-  const stat = h("span", { class: "stat" });
-  const line2 = h("div", { class: "value-sm line2" });
-  const dlSlot = h("div");
-  const card = h("div", { class: "model-card" }, [
-    h("div", { class: "head" }, [name, stat]),
-    line2,
-    dlSlot,
-  ]);
+  const cards = h("div", { class: "model-cards", role: "radiogroup", "aria-label": "Model" });
 
-  const sizeMb = ctx.models[0]?.sizeMb ?? 610;
-
+  // Rebuilt wholesale on every status/info change — a handful of nodes.
   function update() {
-    const present = ctx.models[0]?.present ?? false;
-    line2.textContent = `${sizeMb} MB · SHERPA-ONNX · CPU`;
-    if (!present) {
-      stat.textContent = "NOT ON THIS MACHINE";
-      if (!dlSlot.hasChildNodes()) {
+    cards.innerHTML = "";
+    for (const m of ctx.models) {
+      const isActive = m.id === ctx.config.modelId;
+      const stat = h("span", { class: "stat" });
+      const dlSlot = h("div");
+      const card = h("div", {
+        class: isActive ? "model-card" : "model-card inactive",
+        role: "radio",
+        "aria-checked": String(isActive),
+      }, [
+        h("div", { class: "head" }, [h("span", { class: "name" }, m.display), stat]),
+        h("div", { class: "value-sm line2" }, `${m.sizeMb} MB · ${m.langs} · SHERPA-ONNX · CPU`),
+        dlSlot,
+      ]);
+
+      if (isActive) {
+        switch (ctx.modelStatus.k) {
+          case "ready": stat.textContent = "● LOADED"; break;
+          case "unloaded": stat.textContent = "○ IDLE — UNLOADED"; break;
+          case "loading": stat.textContent = `WARMING UP · ${ctx.modelStatus.pct}%`; break;
+          case "error": stat.textContent = "MODEL ERROR"; break;
+          case "missing": stat.textContent = "NOT ON THIS MACHINE"; break;
+        }
+      } else {
+        stat.textContent = m.present ? "ON THIS MACHINE" : "NOT ON THIS MACHINE";
+      }
+
+      if (!m.present) {
         const slot = h("div", { class: "dl" });
         slot.append(
           h("button", {
             class: "btn",
             onclick: () =>
-              runDownloadFlow(slot, sizeMb, () => {
-                void api.modelInfo().then((m) => {
-                  ctx.models = m;
+              runDownloadFlow(m.id, slot, m.sizeMb, () => {
+                void api.modelInfo().then((info) => {
+                  ctx.models = info;
                   update();
                 });
               }),
-          }, `FETCH THE MODEL · ${sizeMb} MB`),
+          }, `FETCH THE MODEL · ${m.sizeMb} MB`),
         );
         dlSlot.append(slot);
+      } else if (!isActive) {
+        // Present but idle: one click makes it the ear. The recognizer swap is
+        // a 1-3 s reload, surfaced live on the status line.
+        dlSlot.append(
+          h("button", {
+            class: "action",
+            onclick: () => {
+              ctx.config.modelId = m.id;
+              ctx.persistNow();
+              update();
+            },
+          }, "USE THIS MODEL"),
+        );
       }
-      return;
-    }
-    dlSlot.innerHTML = "";
-    switch (ctx.modelStatus.k) {
-      case "ready": stat.textContent = "● LOADED"; break;
-      case "unloaded": stat.textContent = "○ IDLE — UNLOADED"; break;
-      case "loading": stat.textContent = `WARMING UP · ${ctx.modelStatus.pct}%`; break;
-      case "error": stat.textContent = "MODEL ERROR"; break;
-      case "missing": stat.textContent = "NOT ON THIS MACHINE"; break;
+      cards.append(card);
     }
   }
   update();
   ctx.modelCardUpdate = update;
 
   const body = h("div", {}, [
-    card,
+    cards,
     toggleRow("UNLOAD ON IDLE", "FREES ~600 MB. THE NEXT TAKE PAYS A RELOAD.", ctx.config.unloadOnIdle, false, (on) => {
       ctx.config.unloadOnIdle = on;
       ctx.persistNow();
     }),
   ]);
-  return sect("MODEL", "THE ONLY DOWNLOAD DICTUM WILL EVER MAKE.", body);
+  return sect("MODEL", "THE ONLY DOWNLOADS DICTUM WILL EVER MAKE.", body);
 }
 
 // ---------------------------------------------------------------------------
@@ -413,6 +432,70 @@ function buildInjectionSection(ctx: Ctx): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
+// PROJECTS (FILE TAG)
+// ---------------------------------------------------------------------------
+function buildProjectsSection(ctx: Ctx): HTMLElement {
+  const table = h("div", { class: "inj-table" });
+
+  function render() {
+    table.innerHTML = "";
+    for (const [i, root] of ctx.config.projectRoots.entries()) {
+      table.append(
+        h("div", { class: "inj-row" }, [
+          h("span", { class: "c-path mono", title: root }, root),
+          h("button", {
+            class: "x",
+            "aria-label": `Remove ${root}`,
+            onclick: () => {
+              ctx.config.projectRoots.splice(i, 1);
+              render();
+              ctx.persistNow();
+            },
+          }, "✕"),
+        ]),
+      );
+    }
+  }
+  render();
+
+  const addLink = h("button", {
+    class: "action add-app",
+    onclick: () => {
+      const input = h("input", {
+        class: "field-input mono c-path",
+        type: "text",
+        placeholder: "C:\\PATH\\TO\\PROJECT",
+        "aria-label": "Project folder path",
+      });
+      const row = h("div", { class: "inj-row" }, [input]);
+      table.append(row);
+      input.focus();
+      // Windows paths are case-insensitive and arrive in many spellings
+      // (Explorer "Copy as path" quotes, trailing slash, forward slashes) —
+      // normalize before dedupe or a duplicate root double-indexes every file
+      // and unique-or-nothing kills tagging for the whole project.
+      const pathKey = (p: string) => p.toLowerCase().replace(/\//g, "\\");
+      const commit = () => {
+        const p = input.value.trim().replace(/^["']+|["']+$/g, "").replace(/[\\/]+$/, "");
+        row.remove();
+        if (!p || ctx.config.projectRoots.some((r) => pathKey(r) === pathKey(p))) return;
+        ctx.config.projectRoots.push(p);
+        render();
+        ctx.persistNow();
+      };
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") commit();
+        else if (e.key === "Escape") row.remove();
+      });
+      input.addEventListener("blur", commit);
+    },
+  }, "ADD FOLDER");
+
+  const body = h("div", {}, [table, addLink]);
+  return sect("PROJECTS", "SPOKEN FILE NAMES PRINT AS @PATH TAGS.", body);
+}
+
+// ---------------------------------------------------------------------------
 // APPEARANCE (§5.4.6) + ABOUT (§5.4.7)
 // ---------------------------------------------------------------------------
 const THEMES: Theme[] = ["BONE", "LEDGER", "GLACIER", "LILAC", "OBSIDIAN"];
@@ -464,6 +547,7 @@ export function renderSetup(ctx: Ctx, host: HTMLElement): void {
     buildModelSection(ctx),
     buildPrivacySection(ctx),
     buildInjectionSection(ctx),
+    buildProjectsSection(ctx),
     buildAppearanceSection(ctx),
     buildAboutSection(ctx),
   );

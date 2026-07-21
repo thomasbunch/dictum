@@ -7,23 +7,64 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-const MODEL_ID: &str = "parakeet-tdt-0.6b-v2-int8";
-const MODEL_DISPLAY: &str = "PARAKEET-TDT 0.6B V2 INT8";
-const DIR_NAME: &str = "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8";
-/// Extracted on-disk total (~630 MiB); download tarball is ~628 MiB.
-const SIZE_MB: u64 = 630;
-const URL: &str = "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2";
+/// One downloadable model SKU. Both Parakeet exports share the same file
+/// layout, so `ModelFiles` works for every entry.
+pub struct ModelSpec {
+    pub id: &'static str,
+    pub display: &'static str,
+    pub dir_name: &'static str,
+    /// Extracted on-disk total; the download tarball is slightly smaller.
+    pub size_mb: u64,
+    pub url: &'static str,
+    /// SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT").
+    pub langs: &'static str,
+    /// (filename, expected sha256). `None` = presence + non-empty only.
+    files: &'static [(&'static str, Option<&'static str>)],
+}
 
-/// (filename, expected sha256). `None` = presence + non-empty only (tokens.txt).
-const FILES: &[(&str, Option<&str>)] = &[
-    ("encoder.int8.onnx", Some("a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab")),
-    ("decoder.int8.onnx", Some("b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e")),
-    ("joiner.int8.onnx", Some("7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2")),
-    ("tokens.txt", None),
+pub const DEFAULT_MODEL_ID: &str = "parakeet-tdt-0.6b-v2-int8";
+
+pub const MODELS: &[ModelSpec] = &[
+    ModelSpec {
+        id: "parakeet-tdt-0.6b-v2-int8",
+        display: "PARAKEET-TDT 0.6B V2 INT8",
+        dir_name: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8",
+        size_mb: 630,
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
+        langs: "ENGLISH",
+        files: &[
+            ("encoder.int8.onnx", Some("a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab")),
+            ("decoder.int8.onnx", Some("b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e")),
+            ("joiner.int8.onnx", Some("7946164367946e7f9f29a122407c3252b680dbae9a51343eb2488d057c3c43d2")),
+            ("tokens.txt", None),
+        ],
+    },
+    ModelSpec {
+        id: "parakeet-tdt-0.6b-v3-int8",
+        display: "PARAKEET-TDT 0.6B V3 INT8",
+        dir_name: "sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8",
+        size_mb: 641,
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
+        langs: "25 LANGUAGES · AUTO-DETECT",
+        // Hashes computed from the k2-fsa release archive on 2026-07-21 via the
+        // app's own sha256 path.
+        files: &[
+            ("encoder.int8.onnx", Some("acfc2b4456377e15d04f0243af540b7fe7c992f8d898d751cf134c3a55fd2247")),
+            ("decoder.int8.onnx", Some("179e50c43d1a9de79c8a24149a2f9bac6eb5981823f2a2ed88d655b24248db4e")),
+            ("joiner.int8.onnx", Some("3164c13fc2821009440d20fcb5fdc78bff28b4db2f8d0f0b329101719c0948b3")),
+            ("tokens.txt", None),
+        ],
+    },
 ];
 
-pub fn model_dir() -> PathBuf {
-    models_dir().join(DIR_NAME)
+/// Spec for a config model id. Unknown ids (config written by a newer version)
+/// fall back to the default model rather than panicking.
+pub fn spec(id: &str) -> &'static ModelSpec {
+    MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0])
+}
+
+pub fn model_dir(spec: &ModelSpec) -> PathBuf {
+    models_dir().join(spec.dir_name)
 }
 
 /// Absolute paths to the four files the recognizer needs.
@@ -42,8 +83,8 @@ impl ModelFiles {
     }
 }
 
-pub fn model_files() -> ModelFiles {
-    let d = model_dir();
+pub fn model_files(spec: &ModelSpec) -> ModelFiles {
+    let d = model_dir(spec);
     ModelFiles {
         encoder: d.join("encoder.int8.onnx"),
         decoder: d.join("decoder.int8.onnx"),
@@ -52,12 +93,13 @@ pub fn model_files() -> ModelFiles {
     }
 }
 
-pub fn check() -> ModelInfo {
+pub fn check(spec: &'static ModelSpec) -> ModelInfo {
     ModelInfo {
-        id: MODEL_ID.into(),
-        display: MODEL_DISPLAY.into(),
-        present: present(),
-        size_mb: SIZE_MB,
+        id: spec.id.into(),
+        display: spec.display.into(),
+        present: present(spec),
+        size_mb: spec.size_mb,
+        langs: spec.langs.into(),
     }
 }
 
@@ -75,18 +117,18 @@ pub fn find_dropped_archive() -> Option<PathBuf> {
 /// Download (resumable) then extract+verify+install. Progress on the callback.
 /// A partial download is kept for resume; a completed-but-corrupt archive is
 /// discarded (resume would loop forever on the same bad bytes).
-pub fn download(progress: impl Fn(DownloadProgress)) {
-    if let Err(e) = download_inner(&progress) {
+pub fn download(spec: &'static ModelSpec, progress: impl Fn(DownloadProgress)) {
+    if let Err(e) = download_inner(spec, &progress) {
         progress(DownloadProgress::Failed { error: e });
     }
 }
 
-fn download_inner(progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
+fn download_inner(spec: &'static ModelSpec, progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     fs::create_dir_all(models_dir()).map_err(|e| e.to_string())?;
-    let partial = models_dir().join("download.partial");
+    let partial = models_dir().join(format!("{}.partial", spec.id));
 
     let resume_from = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-    let mut req = ureq::get(URL);
+    let mut req = ureq::get(spec.url);
     if resume_from > 0 {
         req = req.set("Range", &format!("bytes={}-", resume_from));
     }
@@ -143,7 +185,7 @@ fn download_inner(progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
 
     progress(DownloadProgress::Verifying);
     match install_from_archive(&partial) {
-        Ok(()) => {
+        Ok(_installed) => {
             fs::remove_file(&partial).ok();
             progress(DownloadProgress::Done);
             Ok(())
@@ -157,9 +199,11 @@ fn download_inner(progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     }
 }
 
-/// Extract a `.tar.bz2`, verify SHA256s, atomically install into model_dir().
-/// Shared by the download and sideload paths.
-pub fn install_from_archive(archive: &Path) -> Result<(), String> {
+/// Extract a `.tar.bz2`, verify SHA256s, atomically install. The archive
+/// decides which SKU it is: whichever spec's hashes match gets the install —
+/// so a sideloaded v3 lands in the v3 slot no matter the filename. Returns the
+/// installed spec. Shared by the download and sideload paths.
+pub fn install_from_archive(archive: &Path) -> Result<&'static ModelSpec, String> {
     let staging = models_dir().join(".staging");
     let _ = fs::remove_dir_all(&staging);
     fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
@@ -171,27 +215,26 @@ pub fn install_from_archive(archive: &Path) -> Result<(), String> {
         .map_err(|e| format!("extract failed: {e}"))?;
 
     let staged = resolve_staged(&staging).ok_or("model files not found in archive")?;
-    verify_dir(&staged)?;
+    let spec = MODELS
+        .iter()
+        .find(|m| verify_dir(m, &staged).is_ok())
+        .ok_or("archive does not match any known model (checksum mismatch)")?;
 
-    let dest = model_dir();
+    let dest = model_dir(spec);
     if dest.exists() {
         fs::remove_dir_all(&dest).map_err(|e| e.to_string())?;
     }
     fs::rename(&staged, &dest).map_err(|e| e.to_string())?;
     let _ = fs::write(dest.join(".verified"), b"ok");
     let _ = fs::remove_dir_all(&staging);
-    Ok(())
+    Ok(spec)
 }
 
-/// The archive's top entry may be the DIR_NAME folder, a differently-named
-/// folder, or the files flat at the root — find where encoder.int8.onnx lives.
+/// The archive's top entry may be a model folder of any name, or the files
+/// flat at the root — find where encoder.int8.onnx lives.
 fn resolve_staged(staging: &Path) -> Option<PathBuf> {
     if staging.join("encoder.int8.onnx").exists() {
         return Some(staging.to_path_buf());
-    }
-    let named = staging.join(DIR_NAME);
-    if named.join("encoder.int8.onnx").exists() {
-        return Some(named);
     }
     fs::read_dir(staging).ok()?.flatten().find_map(|e| {
         let p = e.path();
@@ -201,9 +244,9 @@ fn resolve_staged(staging: &Path) -> Option<PathBuf> {
 
 /// Presence + non-empty for all files; SHA256 for the .onnx files, cached via a
 /// `.verified` marker so startup does not re-hash 660 MB every launch.
-fn present() -> bool {
-    let dir = model_dir();
-    for (name, _) in FILES {
+fn present(spec: &ModelSpec) -> bool {
+    let dir = model_dir(spec);
+    for (name, _) in spec.files {
         match fs::metadata(dir.join(name)) {
             Ok(m) if m.len() > 0 => {}
             _ => return false,
@@ -212,7 +255,7 @@ fn present() -> bool {
     if dir.join(".verified").exists() {
         return true;
     }
-    match verify_dir(&dir) {
+    match verify_dir(spec, &dir) {
         Ok(()) => {
             let _ = fs::write(dir.join(".verified"), b"ok");
             true
@@ -221,8 +264,8 @@ fn present() -> bool {
     }
 }
 
-fn verify_dir(dir: &Path) -> Result<(), String> {
-    for (name, hash) in FILES {
+fn verify_dir(spec: &ModelSpec, dir: &Path) -> Result<(), String> {
+    for (name, hash) in spec.files {
         let p = dir.join(name);
         let meta = fs::metadata(&p).map_err(|_| format!("missing {name}"))?;
         if meta.len() == 0 {
@@ -330,12 +373,27 @@ mod tests {
 
     #[test]
     fn expected_files() {
-        let names: Vec<&str> = FILES.iter().map(|(n, _)| *n).collect();
-        assert_eq!(
-            names,
-            ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"]
-        );
-        assert_eq!(FILES.iter().filter(|(_, h)| h.is_some()).count(), 3);
-        assert!(FILES.last().unwrap().1.is_none()); // tokens.txt: presence-only
+        for m in MODELS {
+            let names: Vec<&str> = m.files.iter().map(|(n, _)| *n).collect();
+            assert_eq!(
+                names,
+                ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"],
+                "{}", m.id
+            );
+            assert_eq!(m.files.iter().filter(|(_, h)| h.is_some()).count(), 3, "{}", m.id);
+            assert!(m.files.last().unwrap().1.is_none()); // tokens.txt: presence-only
+        }
+    }
+
+    #[test]
+    fn registry_lookup_and_fallback() {
+        assert_eq!(spec(DEFAULT_MODEL_ID).id, DEFAULT_MODEL_ID);
+        assert_eq!(spec("parakeet-tdt-0.6b-v3-int8").langs, "25 LANGUAGES · AUTO-DETECT");
+        // A config written by a newer app version must not panic — fall back.
+        assert_eq!(spec("some-future-model").id, DEFAULT_MODEL_ID);
+        // ids and dirs are unique.
+        let mut ids: Vec<_> = MODELS.iter().map(|m| m.id).collect();
+        ids.dedup();
+        assert_eq!(ids.len(), MODELS.len());
     }
 }

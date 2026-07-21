@@ -150,6 +150,12 @@ pub struct Config {
     pub remove_fillers: bool,
     /// exe name (lowercase) -> per-app injection override.
     pub app_overrides: std::collections::BTreeMap<String, AppOverride>,
+    /// Folders indexed for spoken file-name tagging (FILE TAG). Spoken names
+    /// matching an indexed file print as `@relative/path`. Empty = feature off.
+    pub project_roots: Vec<String>,
+    /// Active ASR model (model::MODELS registry id). Unknown ids fall back to
+    /// the English default.
+    pub model_id: String,
 }
 
 impl Default for Config {
@@ -167,6 +173,8 @@ impl Default for Config {
             replacements: Vec::new(),
             remove_fillers: false,
             app_overrides: default_app_overrides(),
+            project_roots: Vec::new(),
+            model_id: crate::model::DEFAULT_MODEL_ID.into(),
         }
     }
 }
@@ -299,6 +307,8 @@ pub struct ModelInfo {
     pub display: String,     // "PARAKEET-TDT 0.6B V2 INT8"
     pub present: bool,
     pub size_mb: u64,
+    /// SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT").
+    pub langs: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

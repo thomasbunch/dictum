@@ -143,6 +143,18 @@ Dictum incorporates the following open-source projects:
 
 **Attribution Statement:** The model weights used by Dictum are derived from NVIDIA Parakeet-TDT 0.6B v2, published by NVIDIA under the CC-BY-4.0 license. The weights have been exported to ONNX format and quantized to int8 precision by the sherpa-onnx project. For full model details, see https://github.com/NVIDIA/NeMo/tree/main/nemo/collections/asr/models/transducers.
 
+### NVIDIA Parakeet-TDT 0.6B v3
+- **License:** CC-BY-4.0 (Creative Commons Attribution 4.0 International)
+- **Author:** NVIDIA
+- **Model:** Parakeet-TDT 0.6B v3 (25 European languages incl. Russian and Ukrainian, automatic language detection, ASR transducer)
+- **URL:** https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+- **License URL:** https://creativecommons.org/licenses/by/4.0/
+- **Attribution Required:** Yes. See below for required attribution text.
+
+**Modifications:** ONNX export and int8 quantization by the sherpa-onnx project.
+
+**Attribution Statement:** The optional multilingual model weights used by Dictum are derived from NVIDIA Parakeet-TDT 0.6B v3, published by NVIDIA under the CC-BY-4.0 license. The weights have been exported to ONNX format and quantized to int8 precision by the sherpa-onnx project.
+
 This CC-BY-4.0 attribution requirement applies to the model weights only and does not affect the licensing of the Dictum application code (Apache-2.0).
 
 ---

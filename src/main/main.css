@@ -288,6 +288,10 @@ body { background: var(--field); border: 1px solid var(--line); }
   border: 1px solid var(--line); background: var(--paper);
   padding: 12px 14px;
 }
+.model-cards { display: flex; flex-direction: column; gap: 10px; }
+.model-card.inactive { border-color: var(--line); }
+.model-card.inactive .name, .model-card.inactive .stat { color: var(--ink2); }
+.model-card .action { margin-top: 8px; }
 .model-card .head { display: flex; justify-content: space-between; align-items: baseline; }
 .model-card .name { font: 400 12.5px "IBM Plex Mono", monospace; text-transform: uppercase; }
 .model-card .stat { font: 400 10px "IBM Plex Mono", monospace; text-transform: uppercase; }
@@ -325,6 +329,9 @@ body { background: var(--field); border: 1px solid var(--line); }
 .inj-row .x { color: var(--ink2); background: none; border: none; cursor: pointer; font: inherit; padding: 0; width: 12px; flex: none; }
 .inj-row .x:hover { color: var(--ink); }
 .inj-row input { font: inherit; width: 190px; }
+/* PROJECTS rows: full paths need the whole row, not the 190px exe column. */
+.inj-row .c-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.inj-row input.c-path { width: auto; }
 .add-app { margin-top: 10px; }
 
 .theme-cards { display: flex; gap: 10px; }

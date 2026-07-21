@@ -28,6 +28,10 @@ export interface Config {
   replacements: Replacement[];
   removeFillers: boolean;
   appOverrides: Record<string, AppOverride>;
+  /** Folders indexed for spoken file-name tagging (FILE TAG). Empty = off. */
+  projectRoots: string[];
+  /** Active ASR model id (see modelInfo()). Unknown ids fall back to default. */
+  modelId: string;
 }
 
 export interface LevelBar { amp: number; clip: boolean }
@@ -63,6 +67,8 @@ export interface HistoryRecord {
 
 export interface ModelInfo {
   id: string; display: string; present: boolean; sizeMb: number;
+  /** SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT"). */
+  langs: string;
 }
 
 export type ModelStatus =
