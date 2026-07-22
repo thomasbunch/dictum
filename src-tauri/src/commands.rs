@@ -5,7 +5,7 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::types::{
-    Config, CoordMsg, DownloadProgress, HistoryRecord, HudEvent, ModelInfo, ModelStatus,
+    Config, CoordMsg, DownloadProgress, GpuInfoDto, HistoryRecord, HudEvent, ModelInfo, ModelStatus,
     ModelStatusDto, Replacement,
 };
 use crate::AppState;
@@ -101,6 +101,19 @@ pub fn toggle_dictation(state: State<AppState>) {
 #[tauri::command]
 pub fn get_model_status(state: State<AppState>) -> ModelStatusDto {
     state.model_status.lock().unwrap().clone()
+}
+
+/// Boot-time reformat (LLM) model status; live updates on `reformat://status`.
+#[tauri::command]
+pub fn get_reformat_status(state: State<AppState>) -> ModelStatusDto {
+    state.reformat_status.lock().unwrap().clone()
+}
+
+/// GPU capability probed at startup — SETUP reformatter section shows which SKU
+/// the gate picked (offerGpu3b => 3B, else 1.5B CPU).
+#[tauri::command]
+pub fn get_gpu_info(state: State<AppState>) -> GpuInfoDto {
+    state.gpu.clone()
 }
 
 #[tauri::command]

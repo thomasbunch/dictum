@@ -5,6 +5,20 @@ use crate::types::{Config, Replacement};
 use regex::{NoExpand, Regex};
 
 pub fn apply(raw: &str, cfg: &Config) -> String {
+    apply_with_cursor(raw, cfg).0
+}
+
+/// Sentinel inside a replacement value marking where the caret should land.
+const CURSOR: &str = "{cursor}";
+
+/// Full transform plus caret hint. Snippets are just replacement rules with
+/// bigger values (multi-line, or bearing a `{cursor}` sentinel) — the pipeline
+/// is unchanged: the sentinel rides through `apply_rule` as a literal (NoExpand)
+/// and is stripped here. Returns the injected text with every `{cursor}` removed
+/// and, if any was present, how many chars from the END of that text the caret
+/// should sit (LAST sentinel wins; None when there was none). Injection consumes
+/// the offset later; this stays pure.
+pub fn apply_with_cursor(raw: &str, cfg: &Config) -> (String, Option<usize>) {
     let mut text = raw.to_string();
     if cfg.remove_fillers {
         text = remove_fillers(&text);
@@ -12,7 +26,17 @@ pub fn apply(raw: &str, cfg: &Config) -> String {
     for rule in &cfg.replacements {
         text = apply_rule(&text, rule);
     }
-    text
+    let offset = cursor_back_offset(&text);
+    (text.replace(CURSOR, ""), offset)
+}
+
+/// Chars between the LAST `{cursor}` sentinel and the end of the final text, or
+/// None if none is present. Pass the expanded (pre-strip) text. Nothing after
+/// the last sentinel can be another sentinel, so that tail's char count is
+/// exactly the caret's distance from the end once every sentinel is stripped.
+pub fn cursor_back_offset(expanded: &str) -> Option<usize> {
+    let last = expanded.rfind(CURSOR)?;
+    Some(expanded[last + CURSOR.len()..].chars().count())
 }
 
 fn remove_fillers(text: &str) -> String {
@@ -161,5 +185,74 @@ mod tests {
     fn json_round_trip() {
         let rules = vec![rule("api", "API"), rule("json", "JSON")];
         assert_eq!(parse_json(&to_json(&rules)).unwrap(), rules);
+    }
+
+    // --- snippets: multi-line + {cursor} -------------------------------
+
+    #[test]
+    fn multiline_value_survives_intact() {
+        let sig = "Best regards,\nThomas\nDictum Inc.";
+        let cfg = cfg_with(vec![rule("sig block", sig)], false);
+        assert_eq!(apply("please add sig block here", &cfg), format!("please add {sig} here"));
+    }
+
+    #[test]
+    fn cursor_at_end_offset_zero() {
+        let cfg = cfg_with(vec![rule("my email", "me@example.com{cursor}")], false);
+        let (text, off) = apply_with_cursor("email me at my email", &cfg);
+        assert_eq!(text, "email me at me@example.com");
+        assert_eq!(off, Some(0));
+    }
+
+    #[test]
+    fn cursor_at_start_of_value() {
+        let cfg = cfg_with(vec![rule("greeting", "{cursor}Dear Sir")], false);
+        let (text, off) = apply_with_cursor("insert greeting", &cfg);
+        assert_eq!(text, "insert Dear Sir");
+        // caret before "Dear Sir" -> 8 chars from the end.
+        assert_eq!(off, Some(8));
+    }
+
+    #[test]
+    fn cursor_multiple_last_wins() {
+        let cfg = cfg_with(vec![rule("tag", "<{cursor}b>{cursor}</b>")], false);
+        let (text, off) = apply_with_cursor("tag", &cfg);
+        assert_eq!(text, "<b></b>"); // both sentinels stripped
+        assert_eq!(off, Some(4)); // after the LAST sentinel: "</b>"
+    }
+
+    #[test]
+    fn cursor_mid_multiline_value() {
+        let cfg = cfg_with(vec![rule("letter", "Dear {cursor},\n\nRegards")], false);
+        let (text, off) = apply_with_cursor("letter", &cfg);
+        assert_eq!(text, "Dear ,\n\nRegards");
+        // tail ",\n\nRegards" = 10 chars.
+        assert_eq!(off, Some(10));
+    }
+
+    #[test]
+    fn no_cursor_returns_none() {
+        let cfg = cfg_with(vec![rule("my email", "me@example.com")], false);
+        let (text, off) = apply_with_cursor("my email", &cfg);
+        assert_eq!(text, "me@example.com");
+        assert_eq!(off, None);
+    }
+
+    #[test]
+    fn cursor_survives_filler_stripping() {
+        // Fillers are stripped from raw BEFORE expansion, so a {cursor} in the
+        // value is untouched by remove_fillers.
+        let cfg = cfg_with(vec![rule("my email", "me@ex.com{cursor}")], true);
+        let (text, off) = apply_with_cursor("um send my email uh", &cfg);
+        assert_eq!(text, "send me@ex.com");
+        assert_eq!(off, Some(0));
+    }
+
+    #[test]
+    fn adjacent_snippet_expansions() {
+        let cfg = cfg_with(vec![rule("greeting", "Hello{cursor}"), rule("closing", "Bye{cursor}")], false);
+        let (text, off) = apply_with_cursor("greeting closing", &cfg);
+        assert_eq!(text, "Hello Bye");
+        assert_eq!(off, Some(0)); // last sentinel (from "closing") sits at the end
     }
 }

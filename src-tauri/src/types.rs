@@ -36,6 +36,13 @@ pub enum CoordMsg {
     DecodeFailed { generation: u64, error: String },
     ModelStatus(ModelStatus),
 
+    // Reformat LLM (reformat module -> coordinator). `generation` mirrors the
+    // ASR staleness guard so a cancel drops an in-flight rewrite.
+    ReformatDone { generation: u64, text: String },
+    ReformatFailed { generation: u64, error: String },
+    /// Reformat model lifecycle (own status, parallel to ASR ModelStatus).
+    ReformatModelStatus { status: ModelStatus },
+
     // System
     /// WM_POWERBROADCAST resume / session unlock — re-arm hotkey.
     SystemResumed,
@@ -116,6 +123,9 @@ pub enum HudState {
     Transcribing,
     Injected { chars: u32 },
     Cancelled,
+    /// The LLM reformatter is rewriting the deterministic text (async, seconds on
+    /// CPU). Distinct from Transcribing so the HUD can show the wait.
+    Reformatting,
     /// `label` + `detail` are the exact wire-voice copy from DESIGN.md §5.6/§6.
     Error { label: String, detail: String },
     /// Recording > 30 s and Esc pressed once: HOLD ON / ESC AGAIN KILLS THE TAKE.
@@ -156,6 +166,10 @@ pub struct Config {
     /// Active ASR model (model::MODELS registry id). Unknown ids fall back to
     /// the English default.
     pub model_id: String,
+    /// LLM reformatter mode: "auto" | "on" | "off". "off" never reformats;
+    /// "on"/"auto" reformat whenever a reformat model is present on disk (the SKU
+    /// is auto-picked by the GPU gate at startup). Old configs default to "auto".
+    pub reformat: String,
 }
 
 impl Default for Config {
@@ -175,6 +189,7 @@ impl Default for Config {
             app_overrides: default_app_overrides(),
             project_roots: Vec::new(),
             model_id: crate::model::DEFAULT_MODEL_ID.into(),
+            reformat: "auto".into(),
         }
     }
 }
@@ -300,6 +315,17 @@ pub struct TakeMeta {
 // Model management
 // ---------------------------------------------------------------------------
 
+/// Which subsystem a model SKU feeds. ASR SKUs are the single-select recognizer
+/// (config.model_id); LLM SKUs are the reformatter (auto-picked, own section).
+/// Lets SETUP render the two kinds separately and keeps GGUF SKUs out of the
+/// ASR model-swap path.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ModelKind {
+    Asr,
+    Llm,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ModelInfo {
@@ -309,6 +335,17 @@ pub struct ModelInfo {
     pub size_mb: u64,
     /// SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT").
     pub langs: String,
+    /// "asr" | "llm" — SETUP renders each kind in its own section.
+    pub kind: ModelKind,
+}
+
+/// GPU capability for the frontend (SETUP reformatter section explains which SKU
+/// the gate picked). Built from `gpu::probe()` once at startup.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GpuInfoDto {
+    pub vram_mb: u64,
+    pub offer_gpu_3b: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
