@@ -38,10 +38,12 @@ If step 2 errors with a cuBLAS failure on the matmul, reinstall torch with the
 
 ```powershell
 # 3B — the GPU SKU:
-python train.py --model Qwen/Qwen2.5-3B-Instruct   --out out/reformat-3b   --epochs 2
+python train.py --model Qwen/Qwen2.5-3B-Instruct   --out out/reformat-3b-al   --epochs 2 --all-linear
 # 1.5B — the CPU-fallback SKU:
-python train.py --model Qwen/Qwen2.5-1.5B-Instruct --out out/reformat-1.5b --epochs 3 --lr 1.5e-4
+python train.py --model Qwen/Qwen2.5-1.5B-Instruct --out out/reformat-1.5b-al --epochs 3 --lr 1.5e-4 --all-linear
 ```
+`--all-linear` is the default recipe as of 2026-07-22: on dataset v2 it beat
+attention-only for BOTH sizes (smoke-gate fails/188: 3B 7→4, 1.5B 13→5).
 ~15–45 min each on the 5090. **Watch the `[mask-check]` line** — it must print
 only the clean completion, never the messy prompt. It keeps the best checkpoint
 (eval_loss), not the last. If it under-cleans (leaves fillers), re-run with
