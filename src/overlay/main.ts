@@ -199,6 +199,17 @@ function onState(next: HudState) {
       });
       render(performance.now()); // one static frame, frozen at 45% via CSS
       break;
+    case "reformatting":
+      // LLM rewrite in flight (seconds on CPU). Freeze the trace like PRINTING…
+      // and keep the elapsed clock; the paper has already stopped.
+      layout({
+        label: "REFORMATTING",
+        slot: "lane",
+        frozenLane: true,
+        right: formatElapsed(totalBars * MS_PER_BAR),
+      });
+      render(performance.now());
+      break;
     case "injected":
       layout({ label: "PRINTED", slot: "none", right: `${next.chars} CH` });
       break;

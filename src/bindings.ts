@@ -4,6 +4,8 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 
 export type Theme = "BONE" | "LEDGER" | "GLACIER" | "LILAC" | "OBSIDIAN";
 export type HotkeyMode = "hold" | "toggle" | "both";
+export type ReformatMode = "auto" | "on" | "off";
+export type ModelKind = "asr" | "llm";
 export type Retention = "keepNothing" | "hours24" | "days7" | "days30" | "forever";
 export type InjectBackend = "clipboard" | "sendInputUnicode";
 export type PasteShortcut = "ctrlV" | "ctrlShiftV";
@@ -32,6 +34,8 @@ export interface Config {
   projectRoots: string[];
   /** Active ASR model id (see modelInfo()). Unknown ids fall back to default. */
   modelId: string;
+  /** LLM reformatter mode ("auto" GPU-gated | "on" | "off"). Default "auto". */
+  reformat: ReformatMode;
 }
 
 export interface LevelBar { amp: number; clip: boolean }
@@ -43,6 +47,7 @@ export type HudState =
   | { k: "transcribing" }
   | { k: "injected"; chars: number }
   | { k: "cancelled" }
+  | { k: "reformatting" }
   | { k: "error"; label: string; detail: string }
   | { k: "confirm_discard" };
 
@@ -69,6 +74,14 @@ export interface ModelInfo {
   id: string; display: string; present: boolean; sizeMb: number;
   /** SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT"). */
   langs: string;
+  /** "asr" | "llm" — SETUP renders each kind in its own section. */
+  kind: ModelKind;
+}
+
+export interface GpuInfoDto {
+  vramMb: number;
+  /** GPU gate result: true => reformatter picks the 3B GPU SKU, else 1.5B CPU. */
+  offerGpu3b: boolean;
 }
 
 export type ModelStatus =
@@ -96,6 +109,8 @@ export const api = {
   listInputDevices: () => invoke<string[]>("list_input_devices"),
   modelInfo: () => invoke<ModelInfo[]>("model_info"),
   getModelStatus: () => invoke<ModelStatus>("get_model_status"),
+  getReformatStatus: () => invoke<ModelStatus>("get_reformat_status"),
+  getGpuInfo: () => invoke<GpuInfoDto>("get_gpu_info"),
   downloadModel: (id: string, onProgress: (p: DownloadProgress) => void) => {
     const ch = new Channel<DownloadProgress>();
     ch.onmessage = onProgress;
