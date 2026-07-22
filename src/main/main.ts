@@ -297,7 +297,10 @@ function renderMasthead(): void {
 
   mastheadEl.append(h("div", { class: "value status-line" }, statusLine()));
 
-  const present = ctx.models[0]?.present ?? false;
+  // Gate on the ACTIVE model's presence, not registry[0] (always the v2 SKU):
+  // a config pointing at v3 with v2 absent must not force the first-run fetch
+  // while the status line already reads MODEL LOADED · V3.
+  const present = activeModel(ctx)?.present ?? false;
   if (!present) {
     // First run (§5.5): the masthead carries the fetch.
     const active = activeModel(ctx);

@@ -5,6 +5,13 @@
 //!
 //! `input` = deterministic pipeline result (post voice/replacements/filetag, pre-LLM).
 //! `out`   = raw LLM output (untrusted).
+//!
+//! Residual unguarded class (accepted, not covered): a *subset-shaped* answer to an
+//! unpunctuated yes/no question — e.g. det "should I use a mutex or a channel here" ->
+//! out "Use a channel here." Gate 4 only trips when the answer *elaborates* (out/in >
+//! `QUESTION_RATIO`); a terse answer that stays shorter than the question reads exactly
+//! like a legit imperative tightening (cf. fixture 9) and cannot be told apart by
+//! length/overlap alone. It passes.
 
 use regex::Regex;
 
@@ -69,14 +76,33 @@ pub fn check(input: &str, out: &str) -> Result<(), Trip> {
         }
     }
 
-    // 5. Identifier preservation + polarity + content overlap.
+    // 5. Identifier + bare-number preservation + polarity + content overlap.
+    // Each code-shaped token OR standalone number in det must survive into out, UNLESS a
+    // self-correction cue ("no wait", "i mean", …) follows it within CORRECTION_WINDOW
+    // tokens — the abandoned branch of a spoken correction is meant to be dropped.
     let out_lower = out.to_lowercase();
-    for ident in identifiers(input) {
-        if !out_lower.contains(&ident.to_lowercase()) {
-            return Err(Trip::IdentifierLost);
+    let out_tokens: std::collections::HashSet<String> = norm_tokens(out).into_iter().collect();
+    let toks: Vec<String> = reconstruct(input).split_whitespace().map(|t| t.to_lowercase()).collect();
+    for (i, raw) in toks.iter().enumerate() {
+        let tok = raw.trim_matches(TRIM);
+        if tok.is_empty() {
+            continue;
         }
+        let is_num = tok.chars().all(|c| c.is_ascii_digit());
+        if !is_num && !is_identifier(tok) {
+            continue;
+        }
+        // Numbers must match as a whole token ("30" must not "match" inside "300");
+        // identifiers keep substring matching (v0.3.0, src/main.rs read fine as substrings).
+        let present = if is_num { out_tokens.contains(tok) } else { out_lower.contains(tok) };
+        if present || abandoned(&toks, i) {
+            continue;
+        }
+        return Err(Trip::IdentifierLost);
     }
-    if negation_count(input) >= 1 && negation_count(out) == 0 {
+    // Polarity: any dropped negation flips meaning. Presence-to-zero only catches
+    // single-negation sentences; a strict decrease catches partial flips too.
+    if negation_count(out) < negation_count(input) {
         return Err(Trip::PolarityFlip);
     }
     // Content-word Jaccard. No dedicated ContentLost variant in the fixed enum, so a
@@ -187,19 +213,27 @@ fn content_words(text: &str) -> std::collections::HashSet<String> {
 const INTERROG: &[&str] = &["why", "how", "what", "whats", "when", "where", "who", "whom", "whose", "which"];
 const FILLERS: &[&str] =
     &["so", "like", "well", "okay", "ok", "um", "uh", "uhm", "erm", "oh", "hey", "yeah", "basically", "actually", "just", "and", "but"];
+// Aux-fronted yes/no start: aux immediately followed by a subject word ("should I…", "can we…",
+// "is the…"). Weak signal only — gate 4 still requires the r>QUESTION_RATIO elaboration condition,
+// so fixture 9's "can you make…" -> imperative (which shrinks) stays passing.
+const AUX: &[&str] =
+    &["should", "shall", "can", "could", "do", "does", "did", "is", "are", "was", "were", "will", "would", "may", "might"];
+const AUX_SUBJ: &[&str] = &["we", "i", "you", "it", "the", "they", "he", "she", "there", "this", "that"];
 
 fn is_interrogative(text: &str) -> bool {
     if text.trim_end().ends_with('?') {
         return true;
     }
-    // First non-filler token decides (skips leading "so like…" scaffolding).
-    for t in norm_tokens(text) {
-        if t.is_empty() || FILLERS.contains(&t.as_str()) {
-            continue;
-        }
-        return INTERROG.contains(&t.as_str());
+    // First non-filler tokens decide (skips leading "so like…" scaffolding).
+    let toks: Vec<String> = norm_tokens(text).into_iter().filter(|t| !t.is_empty() && !FILLERS.contains(&t.as_str())).collect();
+    let first = match toks.first() {
+        Some(t) => t.as_str(),
+        None => return false,
+    };
+    if INTERROG.contains(&first) {
+        return true;
     }
-    false
+    AUX.contains(&first) && toks.get(1).is_some_and(|s| AUX_SUBJ.contains(&s.as_str()))
 }
 
 // --- gate 5: negation --------------------------------------------------
@@ -244,12 +278,24 @@ fn reconstruct(text: &str) -> String {
     s
 }
 
-fn identifiers(input: &str) -> Vec<String> {
-    reconstruct(input)
-        .split_whitespace()
-        .map(|t| t.trim_matches(TRIM).to_string())
-        .filter(|t| is_identifier(t))
-        .collect()
+// A preservable token (identifier or bare number) is exempt from the preservation gate
+// when one of these self-correction cues follows within CORRECTION_WINDOW tokens: the
+// speaker named the wrong thing, then corrected it ("...coordinator.rs no wait scheduler.rs").
+const CORRECTION_WINDOW: usize = 6;
+const CUE_PHRASES: &[&str] = &["no wait", "no,", "actually", "sorry", "i mean", "make that", "scratch that"];
+
+fn abandoned(toks: &[String], i: usize) -> bool {
+    let end = (i + 1 + CORRECTION_WINDOW).min(toks.len());
+    if i + 1 >= end {
+        return false;
+    }
+    let win = &toks[i + 1..end];
+    let joined = win.join(" ");
+    if CUE_PHRASES.iter().any(|c| joined.contains(c)) {
+        return true;
+    }
+    // "not X," — self-correction that names then drops the wrong token.
+    win.windows(2).any(|w| w[0].trim_matches(TRIM) == "not" && w[1].ends_with(','))
 }
 
 /// A code-shaped token: dotted, underscored, camelCase, path, flag, sigil, or alnum-mix.
@@ -271,10 +317,10 @@ fn is_identifier(t: &str) -> bool {
     if t.starts_with('$') {
         return true;
     }
-    // internal dot flanked by alnum (foo.rs, v0.3.0, Qwen2.5)
+    // internal dot/colon flanked by alnum (foo.rs, v0.3.0, Qwen2.5, docker tag nginx:alpine)
     let ch: Vec<char> = t.chars().collect();
     for i in 1..ch.len().saturating_sub(1) {
-        if ch[i] == '.' && ch[i - 1].is_alphanumeric() && ch[i + 1].is_alphanumeric() {
+        if (ch[i] == '.' || ch[i] == ':') && ch[i - 1].is_alphanumeric() && ch[i + 1].is_alphanumeric() {
             return true;
         }
     }
@@ -455,6 +501,79 @@ mod tests {
     fn polarity_preserved_passes() {
         let input = "don't delete the old config file before you check";
         assert!(check(input, "Don't delete the old config file before you check.").is_ok());
+    }
+    #[test]
+    fn partial_negation_flip_trips() {
+        // Finding :79 (critical) — one of two negations dropped; out still has a negation,
+        // so the old presence-to-zero test missed it. A strict decrease catches it.
+        let input = "don't delete the old config and never touch the new one";
+        assert_eq!(check(input, "Delete the old config and never touch the new one."), Err(Trip::PolarityFlip));
+    }
+
+    // ---- finding :74 — identifier self-correction is allowed to drop the abandoned branch ----
+
+    #[test]
+    fn identifier_self_correction_passes() {
+        // det names coordinator.rs, corrects to scheduler.rs; dropping the abandoned one is correct.
+        let input = "move the retry logic into coordinator.rs no wait into scheduler.rs";
+        assert!(check(input, "Move the retry logic into scheduler.rs.").is_ok());
+    }
+    #[test]
+    fn identifier_self_correction_spoken_form_passes() {
+        // Same case via the reformat.rs spoken fixture ("dot rs", not ".rs").
+        let input = "move the retry logic into coordinator dot rs no wait into scheduler dot rs";
+        assert!(check(input, "Move the retry logic into scheduler.rs.").is_ok());
+    }
+    #[test]
+    fn corrupted_mandatory_identifier_still_trips() {
+        // No correction cue -> the identifier stays mandatory even after the self-correction fix.
+        let input = "move the retry logic into scheduler.rs and log it";
+        assert_eq!(check(input, "Move the retry logic into worker.rs and log it."), Err(Trip::IdentifierLost));
+    }
+
+    // ---- finding :181 — bare numbers are preservable (ports / timeouts / counts) ----
+
+    #[test]
+    fn bare_number_changed_trips() {
+        let input = "set the connection timeout to 30 seconds and retry 3 times";
+        assert_eq!(check(input, "Set the connection timeout to 300 seconds and retry 3 times."), Err(Trip::IdentifierLost));
+    }
+    #[test]
+    fn corrected_number_passes() {
+        // "port 80, I mean 8080" — the abandoned 80 may be dropped; 8080 must survive.
+        // (Fuller sentence than the bare 4-word form so the 'mean' token doesn't sink Jaccard.)
+        let input = "set the port to 80, I mean 8080, in the config";
+        assert!(check(input, "Set the port to 8080 in the config.").is_ok());
+    }
+
+    // ---- finding :187 — aux-fronted yes/no questions as a weak signal ----
+
+    #[test]
+    fn answered_yesno_question_elaboration_trips() {
+        // Aux-fronted ("should I…"), no '?', and the answer elaborates past QUESTION_RATIO.
+        let input = "should I use a mutex here";
+        let out = "You should use a mutex here because it prevents concurrent access to the shared state and avoids the race condition entirely.";
+        assert_eq!(check(input, out), Err(Trip::QuestionLost));
+    }
+    #[test]
+    fn subset_answer_to_yesno_passes_documented_gap() {
+        // Residual unguarded class (see module doc): terse subset answer stays shorter than the
+        // question, reads like a legit imperative tightening, and passes.
+        let input = "should I use a mutex or a channel here";
+        assert!(check(input, "Use a channel here.").is_ok());
+    }
+
+    // ---- EVAL.md gap — colon-suffixed docker image tags are identifiers ----
+
+    #[test]
+    fn colon_tag_is_identifier() {
+        assert!(is_identifier("postgres:15-alpine")); // (also caught by alnum-mix)
+        assert!(is_identifier("nginx:alpine")); // no digit — only the colon rule catches this
+    }
+    #[test]
+    fn colon_tag_corruption_trips() {
+        let input = "pull the postgres:15-alpine image before deploying the stack";
+        assert_eq!(check(input, "Pull the postgres15-alpine image before deploying the stack."), Err(Trip::IdentifierLost));
     }
 
     // ---- unit checks on the tricky helpers ----

@@ -15,7 +15,10 @@ rustflags = ["-C", "target-feature=+crt-static"]
 #    (CMP0091 NEW), where this variable — not the injected /MT flag — decides the
 #    runtime, and its default is the DLL (/MD) runtime.
 #  - CMP0091 NEW pinned so the variable above is honored regardless of policy default.
+# force=true so a value already exported in the process env (e.g. a shell/CI
+# default of CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL) can't silently win and
+# reintroduce the /MD-vs-/MT LNK2038 break this file exists to prevent.
 [env]
-LLAMA_STATIC_CRT = "1"
-CMAKE_MSVC_RUNTIME_LIBRARY = "MultiThreaded"
-CMAKE_POLICY_DEFAULT_CMP0091 = "NEW"
+LLAMA_STATIC_CRT = { value = "1", force = true }
+CMAKE_MSVC_RUNTIME_LIBRARY = { value = "MultiThreaded", force = true }
+CMAKE_POLICY_DEFAULT_CMP0091 = { value = "NEW", force = true }

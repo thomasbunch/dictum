@@ -201,6 +201,14 @@ impl Effects for RealEffects {
         // Deterministic pipeline order (PLAN §6): voice commands FIRST (they edit
         // the spoken transcript), then replacements/snippets, then file tagging.
         let voiced = crate::voice::apply(raw);
+        // ponytail: {cursor} caret placement is reserved, not wired. apply() strips
+        // the sentinel so text integrity is correct; the caret offset (from
+        // apply_with_cursor) is dropped here on purpose. Positioning it means firing
+        // N LEFT arrows after inject, which the inject path can't do reliably —
+        // Ctrl+V paste completes asynchronously (arrows would race the paste), the
+        // backend varies per app, and the elevated / focus-changed paths are
+        // clipboard-only with no caret at all. Wire it (thread the offset through
+        // Effects::inject) only once inject gains a synchronous paste-complete signal.
         let text = crate::replacements::apply(&voiced, &cfg);
         if cfg.project_roots.is_empty() {
             return text;
@@ -315,7 +323,14 @@ pub fn run() {
             // lazily on the first reformat — never at boot (2-4 GB).
             let gpu_info = gpu::probe();
             let gpu_dto = GpuInfoDto { vram_mb: gpu_info.vram_mb, offer_gpu_3b: gpu_info.offer_gpu_3b };
-            let reformat_spec = model::reformat_spec(model::reformat_id_for_gpu(gpu_info.offer_gpu_3b));
+            // 3B auto-pick requires the vulkan build; CPU-only builds cap at 1.5B.
+            // Without the vulkan feature reformat.rs sets n_gpu_layers=0, so a 3B
+            // picked on VRAM alone runs entirely on CPU (~4-13s) — the exact
+            // regression the soft-gate exists to avoid. Explicit reformat="on"
+            // still honors the GPU pick so a user can deliberately override.
+            let offer_3b =
+                gpu_info.offer_gpu_3b && (cfg!(feature = "vulkan") || init_cfg.reformat == "on");
+            let reformat_spec = model::reformat_spec(model::reformat_id_for_gpu(offer_3b));
             let reformat = reformat::ReformatEngine::new(tx.clone());
             // The worker is pointed at the SKU below via fx.set_reformat_model once
             // fx exists — startup and config-swap share the same Effects seam.

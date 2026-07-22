@@ -192,80 +192,120 @@ pub fn download(spec: &'static ModelSpec, progress: impl Fn(DownloadProgress)) {
 fn download_inner(spec: &'static ModelSpec, progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     fs::create_dir_all(models_dir()).map_err(|e| e.to_string())?;
     let partial = models_dir().join(format!("{}.partial", spec.id));
+    let expected = spec.size_mb << 20; // SKU size in bytes (approximate for ASR tarballs)
 
-    let resume_from = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-    let mut req = ureq::get(spec.url);
-    if resume_from > 0 {
-        req = req.set("Range", &format!("bytes={}-", resume_from));
-    }
-    let resp = req.call().map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    let start = write_start(status, resume_from);
-    let remaining: u64 = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let total = if status == 206 {
-        resp.header("Content-Range")
-            .and_then(parse_total)
-            .unwrap_or(start + remaining)
-    } else {
-        remaining
-    };
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&partial)
-        .map_err(|e| e.to_string())?;
-    if start > 0 {
-        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
-    } else {
-        file.set_len(0).map_err(|e| e.to_string())?;
-    }
-
-    let mut reader = resp.into_reader();
-    let mut buf = vec![0u8; 1 << 16];
-    let mut done = start;
-    let mut last_pct = u8::MAX;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        let p = pct(done, total);
-        if p != last_pct {
-            last_pct = p;
-            progress(DownloadProgress::Progress {
-                pct: p,
-                mb_done: done >> 20,
-                mb_total: total >> 20,
-            });
-        }
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    drop(file);
+        let resume_from = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
 
+        // A partial at/past the SKU's known size can't be range-resumed: a
+        // `Range: bytes=<eof>-` returns HTTP 416, which otherwise propagates as a
+        // hard Failed and bricks FETCH forever (the partial is never cleared).
+        // Treat it as a completed download — verify+install, else discard and
+        // restart from byte 0.
+        if resume_from > 0 && !should_resume(resume_from, expected) {
+            if install_partial(spec, &partial, progress).is_ok() {
+                return Ok(());
+            }
+            continue; // partial discarded -> loop re-reads resume_from == 0
+        }
+
+        let mut req = ureq::get(spec.url);
+        if resume_from > 0 {
+            req = req.set("Range", &format!("bytes={}-", resume_from));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            // Server rejected the resume range — a full-size partial we didn't
+            // catch above (size_mb is only approximate for the ASR tarball). Same
+            // verify-or-restart recovery as the pre-check.
+            Err(ureq::Error::Status(416, _)) => {
+                if install_partial(spec, &partial, progress).is_ok() {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        let status = resp.status();
+        let start = write_start(status, resume_from);
+        let remaining: u64 = resp
+            .header("Content-Length")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let total = if status == 206 {
+            resp.header("Content-Range")
+                .and_then(parse_total)
+                .unwrap_or(start + remaining)
+        } else {
+            remaining
+        };
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&partial)
+            .map_err(|e| e.to_string())?;
+        if start > 0 {
+            file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        } else {
+            file.set_len(0).map_err(|e| e.to_string())?;
+        }
+
+        let mut reader = resp.into_reader();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut done = start;
+        let mut last_pct = u8::MAX;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            let p = pct(done, total);
+            if p != last_pct {
+                last_pct = p;
+                progress(DownloadProgress::Progress {
+                    pct: p,
+                    mb_done: done >> 20,
+                    mb_total: total >> 20,
+                });
+            }
+        }
+        file.flush().map_err(|e| e.to_string())?;
+        drop(file);
+
+        return install_partial(spec, &partial, progress);
+    }
+}
+
+/// Whether a ranged resume is safe. A partial at or past the SKU's known full
+/// size can't be resumed — the server answers HTTP 416 to a `Range` starting at
+/// EOF — so it must be verified-or-restarted instead. `expected` is bytes.
+fn should_resume(resume_from: u64, expected: u64) -> bool {
+    resume_from > 0 && resume_from < expected
+}
+
+/// Verify + install a fully-downloaded partial (ASR archive or LLM gguf), then
+/// remove it. On failure the partial is deleted too, so the caller can restart
+/// from byte 0 (resuming would just re-serve the same bad bytes).
+fn install_partial(spec: &'static ModelSpec, partial: &Path, progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     progress(DownloadProgress::Verifying);
     // ASR = tar.bz2 archive (checksum decides which SKU); LLM = one .gguf we
     // already know the SKU of (download() took the spec).
     let installed = match spec.kind {
-        ModelKind::Asr => install_from_archive(&partial).map(|_| ()),
-        ModelKind::Llm => install_single_file(spec, &partial),
+        ModelKind::Asr => install_from_archive(partial).map(|_| ()),
+        ModelKind::Llm => install_single_file(spec, partial),
     };
     match installed {
         Ok(()) => {
-            fs::remove_file(&partial).ok(); // no-op for LLM (partial was renamed)
+            fs::remove_file(partial).ok(); // no-op for LLM (partial was renamed)
             progress(DownloadProgress::Done);
             Ok(())
         }
         Err(e) => {
-            // Download completed but verification failed — resuming re-serves the
-            // same bytes, so start fresh next time.
-            fs::remove_file(&partial).ok();
+            fs::remove_file(partial).ok();
             Err(e)
         }
     }
@@ -485,6 +525,16 @@ mod tests {
         assert_eq!(write_start(206, 1000), 1000); // range honored -> append
         assert_eq!(write_start(200, 1000), 0); // range ignored -> restart
         assert_eq!(write_start(206, 0), 0);
+    }
+
+    #[test]
+    fn resume_only_below_known_size() {
+        let expected = 100u64;
+        assert!(!should_resume(0, expected)); // nothing on disk -> fresh GET
+        assert!(should_resume(50, expected)); // mid-download -> range-resume
+        // At/past full size a ranged request 416s; must verify-or-restart, not resume.
+        assert!(!should_resume(100, expected)); // exactly full (the 416 trap)
+        assert!(!should_resume(150, expected)); // over-size (asset re-uploaded smaller)
     }
 
     #[test]

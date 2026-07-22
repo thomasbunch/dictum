@@ -503,6 +503,22 @@ impl Coordinator {
             // Tray "Stop dictation" ends any recording.
             (State::Recording { .. }, ToggleDictation) => self.to_awaiting_tail(fx),
 
+            // Hotkey/tray press while an async reformat is in flight = "commit the
+            // current take now and start the next one". The reformat window is
+            // seconds long (up to REFORMAT_TIMEOUT_MS); without this a fast user
+            // chaining sentences hits the catch-all and loses the opening words
+            // with no cue. Inject the deterministic text immediately (the same
+            // path ReformatFailed/timeout use), then start the new session.
+            // start_recording bumps the generation, so the in-flight LLM reply
+            // lands stale and is dropped by the ReformatDone gen guard.
+            (State::Reformatting, m @ (HotkeyDown | ToggleDictation)) => {
+                let toggled = matches!(m, ToggleDictation);
+                if let Some((raw, det)) = self.pending.take() {
+                    self.finish_reformat(fx, raw, det);
+                }
+                self.start_recording(fx, toggled);
+            }
+
             // ---- Cancel -------------------------------------------------------
             (State::Recording { started_at, .. }, Cancel) => {
                 let elapsed = fx.now().duration_since(started_at).as_secs();
@@ -1616,6 +1632,30 @@ mod tests {
         // The now-stale reply arrives — dropped, nothing injected.
         c.handle(CoordMsg::ReformatDone { generation: g, text: "some rewrite".into() }, &mut fx);
         assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
+    }
+
+    #[test]
+    fn hotkey_during_reformat_commits_and_starts_next() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat "auto"
+
+        let det = "commit this now and start the next sentence";
+        let g = take_to_decode(&mut c, &mut fx, det);
+        assert!(matches!(c.state, State::Reformatting));
+        assert!(fx.has(&Call::Reformat { gen: g, det: det.into() }));
+
+        // A hotkey press mid-reformat commits det AND opens a fresh take.
+        fx.calls.clear();
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        assert!(fx.has(&Call::Inject(det.into()))); // committed the pending take
+        assert!(fx.has(&Call::StartCapture(None))); // next take is capturing
+        assert!(matches!(c.state, State::Recording { .. }));
+        assert_ne!(c.gen, g); // generation bumped -> in-flight reply now stale
+
+        // The late reformat reply arrives stale and is dropped, not injected.
+        c.handle(CoordMsg::ReformatDone { generation: g, text: "reformatted rewrite".into() }, &mut fx);
+        assert!(!fx.has(&Call::Inject("reformatted rewrite".into())));
     }
 
     #[test]
