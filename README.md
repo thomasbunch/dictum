@@ -6,9 +6,17 @@ Hold your hotkey anywhere, speak, release — transcribed text appears at your c
 
 ## Status
 
-Pre-release (v0.2.x). Internal codename: Dictum (public name pending rename).
+Pre-release (v0.3.0). Internal codename: Dictum (public name pending rename).
 
-Working end to end on real hardware: full dictation pipeline, injection fallback chain, history, replacements, spoken `@file` mentions (FILE TAG), and English + 25-language multilingual models.
+Working end to end on real hardware: full dictation pipeline, injection fallback chain, history, replacements, spoken `@file` mentions (FILE TAG), English + 25-language multilingual models — and as of 0.3: a fully local AI reformatter, voice commands, and snippets.
+
+## New in 0.3
+
+**Local LLM reformatter (opt-in).** A purpose-built, fine-tuned model (Qwen2.5 LoRA, Q4_K_M GGUF, llama.cpp) rewrites spoken dictation into clean written text for an AI coding agent: fillers and false starts removed, self-corrections resolved, identifiers preserved exactly, questions kept as questions — never answered. Runs 100% locally; the model is an optional download under SETUP → REFORMATTER (1.5B ~986 MB for CPU, 3B ~1.9 GB for GPU, auto-selected). Every output passes a deterministic guardrail chain (length-ratio, identifier-preservation, question-kept, polarity); any trip falls back to the deterministic cleanup — and the raw transcript is always recoverable in history.
+
+**Voice commands.** "new line", "new paragraph", "scratch that", "delete last sentence", "all caps that", "make that a list" — deterministic, no LLM, designed to never trigger when you're merely *saying* those words mid-sentence.
+
+**Voice snippets.** Replacements now support multi-line expansions ("sig block" → your signature). A `{cursor}` placeholder is reserved for caret positioning in a future release.
 
 ## Quick Start
 

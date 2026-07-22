@@ -1,6 +1,6 @@
 [package]
 name = "dictum"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local, CPU-only, push-to-talk dictation for Windows"
 license = "Apache-2.0"
 edition = "2021"
@@ -17,7 +17,7 @@ custom-protocol = ["tauri/custom-protocol"]
 # LLM reformatter (llama.cpp native build). On by default; --no-default-features
 # drops the native build and reformat.rs uses its deterministic stub path.
 reformat-llm = ["dep:llama-cpp-2"]
-# Offload all layers to the GPU (Vulkan). NOT built tonight — needs the Vulkan
+# Offload all layers to the GPU (Vulkan). NOT built tonight â€” needs the Vulkan
 # SDK installed; CPU default is n_gpu_layers=0.
 vulkan = ["llama-cpp-2/vulkan"]
 
