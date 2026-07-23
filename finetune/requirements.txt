@@ -1,0 +1,8 @@
+# Dictum reformatter fine-tune deps.
+# IMPORTANT: install torch SEPARATELY FIRST with the cu128 index (see README.md) —
+# do NOT let pip resolve torch from PyPI, it pulls a CPU build and sm_120 fails.
+transformers>=4.46
+trl>=0.23,<0.25
+peft>=0.13
+accelerate>=1.0
+datasets>=3.0

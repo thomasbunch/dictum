@@ -7,8 +7,10 @@ use std::fs;
 use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
-/// One downloadable model SKU. Both Parakeet exports share the same file
-/// layout, so `ModelFiles` works for every entry.
+/// One downloadable model SKU. ASR SKUs are `.tar.bz2` archives (4-file sherpa
+/// layout, `ModelFiles`); LLM SKUs are a single `.gguf` file. `kind` selects the
+/// download/install/sideload branch — everything else (`present`/`verify_dir`)
+/// is generic over `files`.
 pub struct ModelSpec {
     pub id: &'static str,
     pub display: &'static str,
@@ -18,11 +20,18 @@ pub struct ModelSpec {
     pub url: &'static str,
     /// SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT").
     pub langs: &'static str,
+    /// ASR (tar.bz2, sherpa) vs LLM (single .gguf, llama.cpp).
+    pub kind: ModelKind,
     /// (filename, expected sha256). `None` = presence + non-empty only.
     files: &'static [(&'static str, Option<&'static str>)],
 }
 
 pub const DEFAULT_MODEL_ID: &str = "parakeet-tdt-0.6b-v2-int8";
+
+/// Reformat LLM SKU ids — auto-picked by the GPU gate (gpu.rs), never a stored
+/// user selection. 3B on a capable dGPU, 1.5B CPU fallback.
+pub const REFORMAT_3B_ID: &str = "dictum-reformat-3b";
+pub const REFORMAT_1_5B_ID: &str = "dictum-reformat-1.5b";
 
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
@@ -32,6 +41,7 @@ pub const MODELS: &[ModelSpec] = &[
         size_mb: 630,
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8.tar.bz2",
         langs: "ENGLISH",
+        kind: ModelKind::Asr,
         files: &[
             ("encoder.int8.onnx", Some("a32b12d17bbbc309d0686fbbcc2987b5e9b8333a7da83fa6b089f0a2acd651ab")),
             ("decoder.int8.onnx", Some("b6bb64963457237b900e496ee9994b59294526439fbcc1fecf705b31a15c6b4e")),
@@ -46,6 +56,7 @@ pub const MODELS: &[ModelSpec] = &[
         size_mb: 641,
         url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-parakeet-tdt-0.6b-v3-int8.tar.bz2",
         langs: "25 LANGUAGES · AUTO-DETECT",
+        kind: ModelKind::Asr,
         // Hashes computed from the k2-fsa release archive on 2026-07-21 via the
         // app's own sha256 path.
         files: &[
@@ -55,6 +66,27 @@ pub const MODELS: &[ModelSpec] = &[
             ("tokens.txt", None),
         ],
     },
+    // --- Reformat LLM SKUs: single .gguf files, not archives. -----------------
+    ModelSpec {
+        id: REFORMAT_3B_ID,
+        display: "DICTUM REFORMAT 3B",
+        dir_name: "dictum-reformat-3b",
+        size_mb: 1930,
+        url: "https://github.com/thomasbunch/dictum/releases/download/v0.3.0/dictum-reformat-3b-Q4_K_M.gguf",
+        langs: "3B · Q4_K_M · GPU (4GB+ VRAM)",
+        kind: ModelKind::Llm,
+        files: &[("dictum-reformat-3b-Q4_K_M.gguf", Some("ddd7a3ecfbe7f4497f3235305570f64d78d72f581eae9d2f829786983021bc87"))],
+    },
+    ModelSpec {
+        id: REFORMAT_1_5B_ID,
+        display: "DICTUM REFORMAT 1.5B",
+        dir_name: "dictum-reformat-1.5b",
+        size_mb: 986,
+        url: "https://github.com/thomasbunch/dictum/releases/download/v0.3.0/dictum-reformat-1.5b-Q4_K_M.gguf",
+        langs: "1.5B · Q4_K_M · CPU",
+        kind: ModelKind::Llm,
+        files: &[("dictum-reformat-1.5b-Q4_K_M.gguf", Some("ee87905270eb92b2ec00ed6536241dd1553caff4e2f7f8c6ea192faccaba2d72"))],
+    },
 ];
 
 /// Spec for a config model id. Unknown ids (config written by a newer version)
@@ -63,8 +95,41 @@ pub fn spec(id: &str) -> &'static ModelSpec {
     MODELS.iter().find(|m| m.id == id).unwrap_or(&MODELS[0])
 }
 
+/// Reformat (LLM) spec by id. Unknown/missing ids fall back to the 1.5B CPU SKU
+/// — NOT to an ASR spec (spec()'s fallback would resolve a bad id to a recognizer).
+pub fn reformat_spec(id: &str) -> &'static ModelSpec {
+    MODELS
+        .iter()
+        .find(|m| m.id == id && m.kind == ModelKind::Llm)
+        .unwrap_or_else(|| MODELS.iter().find(|m| m.id == REFORMAT_1_5B_ID).unwrap())
+}
+
+/// The reformat SKU the GPU gate picks: 3B on a capable dGPU, else 1.5B CPU.
+pub fn reformat_id_for_gpu(offer_gpu_3b: bool) -> &'static str {
+    if offer_gpu_3b {
+        REFORMAT_3B_ID
+    } else {
+        REFORMAT_1_5B_ID
+    }
+}
+
 pub fn model_dir(spec: &ModelSpec) -> PathBuf {
     models_dir().join(spec.dir_name)
+}
+
+/// The single file of a one-file (LLM/GGUF) SKU, inside its `dir_name` folder.
+pub fn single_file_path(spec: &ModelSpec) -> PathBuf {
+    model_dir(spec).join(spec.files[0].0)
+}
+
+/// Cheap presence check: every listed file exists and is non-empty. No SHA256
+/// (unlike `present()`), so it's safe to call on the coordinator thread each
+/// take to gate whether to attempt a reformat.
+pub fn files_present(spec: &ModelSpec) -> bool {
+    let dir = model_dir(spec);
+    spec.files
+        .iter()
+        .all(|(name, _)| fs::metadata(dir.join(name)).map(|m| m.len() > 0).unwrap_or(false))
 }
 
 /// Absolute paths to the four files the recognizer needs.
@@ -100,6 +165,7 @@ pub fn check(spec: &'static ModelSpec) -> ModelInfo {
         present: present(spec),
         size_mb: spec.size_mb,
         langs: spec.langs.into(),
+        kind: spec.kind,
     }
 }
 
@@ -126,75 +192,180 @@ pub fn download(spec: &'static ModelSpec, progress: impl Fn(DownloadProgress)) {
 fn download_inner(spec: &'static ModelSpec, progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     fs::create_dir_all(models_dir()).map_err(|e| e.to_string())?;
     let partial = models_dir().join(format!("{}.partial", spec.id));
+    let expected = spec.size_mb << 20; // SKU size in bytes (approximate for ASR tarballs)
 
-    let resume_from = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
-    let mut req = ureq::get(spec.url);
-    if resume_from > 0 {
-        req = req.set("Range", &format!("bytes={}-", resume_from));
-    }
-    let resp = req.call().map_err(|e| e.to_string())?;
-
-    let status = resp.status();
-    let start = write_start(status, resume_from);
-    let remaining: u64 = resp
-        .header("Content-Length")
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(0);
-    let total = if status == 206 {
-        resp.header("Content-Range")
-            .and_then(parse_total)
-            .unwrap_or(start + remaining)
-    } else {
-        remaining
-    };
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .open(&partial)
-        .map_err(|e| e.to_string())?;
-    if start > 0 {
-        file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
-    } else {
-        file.set_len(0).map_err(|e| e.to_string())?;
-    }
-
-    let mut reader = resp.into_reader();
-    let mut buf = vec![0u8; 1 << 16];
-    let mut done = start;
-    let mut last_pct = u8::MAX;
     loop {
-        let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
-        if n == 0 {
-            break;
-        }
-        file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
-        done += n as u64;
-        let p = pct(done, total);
-        if p != last_pct {
-            last_pct = p;
-            progress(DownloadProgress::Progress {
-                pct: p,
-                mb_done: done >> 20,
-                mb_total: total >> 20,
-            });
-        }
-    }
-    file.flush().map_err(|e| e.to_string())?;
-    drop(file);
+        let resume_from = fs::metadata(&partial).map(|m| m.len()).unwrap_or(0);
 
+        // A partial at/past the SKU's known size can't be range-resumed: a
+        // `Range: bytes=<eof>-` returns HTTP 416, which otherwise propagates as a
+        // hard Failed and bricks FETCH forever (the partial is never cleared).
+        // Treat it as a completed download — verify+install, else discard and
+        // restart from byte 0.
+        if resume_from > 0 && !should_resume(resume_from, expected) {
+            if install_partial(spec, &partial, progress).is_ok() {
+                return Ok(());
+            }
+            continue; // partial discarded -> loop re-reads resume_from == 0
+        }
+
+        let mut req = ureq::get(spec.url);
+        if resume_from > 0 {
+            req = req.set("Range", &format!("bytes={}-", resume_from));
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            // Server rejected the resume range — a full-size partial we didn't
+            // catch above (size_mb is only approximate for the ASR tarball). Same
+            // verify-or-restart recovery as the pre-check.
+            Err(ureq::Error::Status(416, _)) => {
+                if install_partial(spec, &partial, progress).is_ok() {
+                    return Ok(());
+                }
+                continue;
+            }
+            Err(e) => return Err(e.to_string()),
+        };
+
+        let status = resp.status();
+        let start = write_start(status, resume_from);
+        let remaining: u64 = resp
+            .header("Content-Length")
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let total = if status == 206 {
+            resp.header("Content-Range")
+                .and_then(parse_total)
+                .unwrap_or(start + remaining)
+        } else {
+            remaining
+        };
+
+        let mut file = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .open(&partial)
+            .map_err(|e| e.to_string())?;
+        if start > 0 {
+            file.seek(SeekFrom::Start(start)).map_err(|e| e.to_string())?;
+        } else {
+            file.set_len(0).map_err(|e| e.to_string())?;
+        }
+
+        let mut reader = resp.into_reader();
+        let mut buf = vec![0u8; 1 << 16];
+        let mut done = start;
+        let mut last_pct = u8::MAX;
+        loop {
+            let n = reader.read(&mut buf).map_err(|e| e.to_string())?;
+            if n == 0 {
+                break;
+            }
+            file.write_all(&buf[..n]).map_err(|e| e.to_string())?;
+            done += n as u64;
+            let p = pct(done, total);
+            if p != last_pct {
+                last_pct = p;
+                progress(DownloadProgress::Progress {
+                    pct: p,
+                    mb_done: done >> 20,
+                    mb_total: total >> 20,
+                });
+            }
+        }
+        file.flush().map_err(|e| e.to_string())?;
+        drop(file);
+
+        return install_partial(spec, &partial, progress);
+    }
+}
+
+/// Whether a ranged resume is safe. A partial at or past the SKU's known full
+/// size can't be resumed — the server answers HTTP 416 to a `Range` starting at
+/// EOF — so it must be verified-or-restarted instead. `expected` is bytes.
+fn should_resume(resume_from: u64, expected: u64) -> bool {
+    resume_from > 0 && resume_from < expected
+}
+
+/// Verify + install a fully-downloaded partial (ASR archive or LLM gguf), then
+/// remove it. On failure the partial is deleted too, so the caller can restart
+/// from byte 0 (resuming would just re-serve the same bad bytes).
+fn install_partial(spec: &'static ModelSpec, partial: &Path, progress: &impl Fn(DownloadProgress)) -> Result<(), String> {
     progress(DownloadProgress::Verifying);
-    match install_from_archive(&partial) {
-        Ok(_installed) => {
-            fs::remove_file(&partial).ok();
+    // ASR = tar.bz2 archive (checksum decides which SKU); LLM = one .gguf we
+    // already know the SKU of (download() took the spec).
+    let installed = match spec.kind {
+        ModelKind::Asr => install_from_archive(partial).map(|_| ()),
+        ModelKind::Llm => install_single_file(spec, partial),
+    };
+    match installed {
+        Ok(()) => {
+            fs::remove_file(partial).ok(); // no-op for LLM (partial was renamed)
             progress(DownloadProgress::Done);
             Ok(())
         }
         Err(e) => {
-            // Download completed but the archive is bad — resuming re-serves the
-            // same bytes, so start fresh next time.
-            fs::remove_file(&partial).ok();
+            fs::remove_file(partial).ok();
             Err(e)
+        }
+    }
+}
+
+/// Install a downloaded single-file (GGUF) SKU: verify its sha256, then move the
+/// partial into `model_dir(spec)/<filename>` and write the `.verified` marker.
+/// The SKU is known (download took the spec), so no checksum-identity search.
+fn install_single_file(spec: &'static ModelSpec, partial: &Path) -> Result<(), String> {
+    let (name, hash) = spec.files[0];
+    if let Some(expected) = hash {
+        let got = sha256_file(partial).map_err(|e| e.to_string())?;
+        if !got.eq_ignore_ascii_case(expected) {
+            return Err(format!("checksum mismatch for {name}"));
+        }
+    }
+    let dest_dir = model_dir(spec);
+    fs::create_dir_all(&dest_dir).map_err(|e| e.to_string())?;
+    let dest = dest_dir.join(name);
+    fs::remove_file(&dest).ok();
+    fs::rename(partial, &dest).map_err(|e| e.to_string())?;
+    let _ = fs::write(dest_dir.join(".verified"), b"ok");
+    Ok(())
+}
+
+/// Offline sideload for LLM SKUs (PLAN §6 "same offline sideload path"): install
+/// any hand-dropped `dictum-reformat-*.gguf` sitting loose in models_dir() into
+/// its SKU folder. Filename identifies the SKU; sha256 must match. Cheap no-op
+/// when nothing is dropped. Called once at boot on a background thread — it only
+/// installs the file, never loads the model (reformat stays lazy).
+// ponytail: filename-keyed match (not checksum-search like archives) — a mislabeled
+// gguf is caught by the sha256 verify below, which is the real gate.
+pub fn sideload_reformat_gguf() {
+    let Ok(entries) = fs::read_dir(models_dir()) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        let is_gguf = p.extension().and_then(|x| x.to_str()).is_some_and(|x| x.eq_ignore_ascii_case("gguf"));
+        if !is_gguf {
+            continue;
+        }
+        let fname = match p.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => continue,
+        };
+        let Some(spec) = MODELS.iter().find(|m| m.kind == ModelKind::Llm && m.files[0].0 == fname) else { continue };
+        if files_present(spec) {
+            continue; // already installed
+        }
+        if let Some(expected) = spec.files[0].1 {
+            match sha256_file(&p) {
+                Ok(got) if got.eq_ignore_ascii_case(expected) => {}
+                _ => continue, // corrupt / wrong file — leave it alone
+            }
+        }
+        let dest_dir = model_dir(spec);
+        if fs::create_dir_all(&dest_dir).is_err() {
+            continue;
+        }
+        if fs::rename(&p, dest_dir.join(spec.files[0].0)).is_ok() {
+            let _ = fs::write(dest_dir.join(".verified"), b"ok");
         }
     }
 }
@@ -357,6 +528,16 @@ mod tests {
     }
 
     #[test]
+    fn resume_only_below_known_size() {
+        let expected = 100u64;
+        assert!(!should_resume(0, expected)); // nothing on disk -> fresh GET
+        assert!(should_resume(50, expected)); // mid-download -> range-resume
+        // At/past full size a ranged request 416s; must verify-or-restart, not resume.
+        assert!(!should_resume(100, expected)); // exactly full (the 416 trap)
+        assert!(!should_resume(150, expected)); // over-size (asset re-uploaded smaller)
+    }
+
+    #[test]
     fn pct_clamps() {
         assert_eq!(pct(0, 0), 0);
         assert_eq!(pct(0, 100), 0);
@@ -373,7 +554,7 @@ mod tests {
 
     #[test]
     fn expected_files() {
-        for m in MODELS {
+        for m in MODELS.iter().filter(|m| m.kind == ModelKind::Asr) {
             let names: Vec<&str> = m.files.iter().map(|(n, _)| *n).collect();
             assert_eq!(
                 names,
@@ -383,6 +564,25 @@ mod tests {
             assert_eq!(m.files.iter().filter(|(_, h)| h.is_some()).count(), 3, "{}", m.id);
             assert!(m.files.last().unwrap().1.is_none()); // tokens.txt: presence-only
         }
+    }
+
+    #[test]
+    fn llm_skus_are_single_hashed_gguf() {
+        for m in MODELS.iter().filter(|m| m.kind == ModelKind::Llm) {
+            assert_eq!(m.files.len(), 1, "{}: LLM SKU is one file", m.id);
+            let (name, hash) = m.files[0];
+            assert!(name.ends_with(".gguf"), "{}: {name} is not a .gguf", m.id);
+            assert!(hash.is_some(), "{}: GGUF must carry a sha256", m.id);
+            // single_file_path lands inside the SKU subfolder (present()/verify_dir
+            // assume models_dir()/dir_name/<file>).
+            assert!(single_file_path(m).ends_with(name));
+        }
+        // The GPU gate resolves to real, distinct LLM specs.
+        assert_eq!(reformat_id_for_gpu(true), REFORMAT_3B_ID);
+        assert_eq!(reformat_id_for_gpu(false), REFORMAT_1_5B_ID);
+        assert_eq!(reformat_spec(REFORMAT_3B_ID).kind, ModelKind::Llm);
+        // A bad/unknown reformat id falls back to the CPU SKU, never to ASR.
+        assert_eq!(reformat_spec("bogus").id, REFORMAT_1_5B_ID);
     }
 
     #[test]

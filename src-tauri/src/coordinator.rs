@@ -23,6 +23,9 @@ const HUD_ERROR_MS: u64 = 2400;
 const HUD_FADE_MS: u64 = 150;
 // ponytail: fixed idle-unload delay; make it a config knob only if RAM tuning demands.
 const IDLE_UNLOAD_MS: u64 = 30_000;
+// Reformat is the deterministic text's fallback: if the LLM hasn't answered in
+// this long, inject `det` and move on (CPU worst case is seconds, PLAN §5.3).
+const REFORMAT_TIMEOUT_MS: u64 = 30_000;
 
 /// Earcon kinds. The audio `Cue` enum lives in another module; this is the
 /// coordinator-facing alias, mapped in the `Effects` impl.
@@ -69,6 +72,30 @@ pub trait Effects {
     fn set_model(&mut self, _id: String) {}
     /// A transcription is now held for PasteLast — the tray menu item enables.
     fn set_paste_available(&mut self, _on: bool) {}
+
+    // --- Reformat LLM (all default no-op / false so the test Mock stays lean;
+    //     RealEffects drives the reformat worker) --------------------------
+    /// Fire-and-forget: reformat `det`; the worker replies `CoordMsg::Reformat*`
+    /// tagged with `generation` for the same staleness guard as ASR decode.
+    fn reformat(&mut self, _det: String, _generation: u64) {}
+    /// Warm-load the reformat model (unused by the coordinator today — reformat()
+    /// lazy-loads — but part of the Effects contract).
+    fn ensure_reformat_model(&mut self) {}
+    /// Drop the reformat model to free RAM (idle-unload).
+    fn unload_reformat_model(&mut self) {}
+    /// Repoint the reformat worker at a different SKU.
+    fn set_reformat_model(&mut self, _id: String) {}
+    /// Switch the reformat compute device (config reformat_device: auto/gpu/cpu).
+    /// Reloads the model on next use if the device changed.
+    fn set_reformat_device(&mut self, _device: String) {}
+    /// Is the GPU-gated reformat SKU present on disk? Cheap (no hashing). Gates
+    /// whether a take attempts a reformat at all.
+    fn reformat_model_present(&mut self) -> bool {
+        false
+    }
+    /// Reformat model status changed — surface to the main window (own event,
+    /// parallel to `announce_model_status`).
+    fn announce_reformat_status(&mut self, _st: &ModelStatus) {}
     fn now(&mut self) -> Instant;
 }
 
@@ -80,6 +107,10 @@ enum State {
     // Injecting is synchronous (inject() returns immediately), so it is not a
     // resident wait-state — it happens inline in the DecodeDone handler.
     Decoding,
+    /// Deterministic text is computed and the async LLM reformat is in flight —
+    /// a resident wait-state (unlike Injecting) because the reply is seconds away.
+    /// Cancellable; a late reply is dropped by the generation guard.
+    Reformatting,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -90,6 +121,8 @@ enum Timer {
     HideWindow,
     RevertConfirm,
     UnloadIdle,
+    /// Reformat took too long — inject the deterministic text instead.
+    ReformatTimeout,
 }
 
 pub struct Coordinator {
@@ -99,6 +132,13 @@ pub struct Coordinator {
     /// (mismatched generation) is dropped, never dropped by timing.
     gen: u64,
     model_status: ModelStatus,
+    /// Reformat model lifecycle, tracked separately from the ASR `model_status`
+    /// and surfaced to the frontend. Not used to gate reformat (presence-on-disk
+    /// via `fx.reformat_model_present()` does that).
+    reformat_status: ModelStatus,
+    /// (raw, det) held while an async reformat is in flight. `raw` -> history,
+    /// `det` -> the guardrail input and the fallback text. Cleared on session reset.
+    pending: Option<(String, String)>,
 
     // Per-session accumulation.
     texts: Vec<String>,     // decoded segment/tail texts in arrival (=dispatch) order
@@ -122,6 +162,8 @@ impl Coordinator {
             state: State::Idle,
             gen: 0,
             model_status: ModelStatus::Ready, // assume shell sends real status before first use
+            reformat_status: ModelStatus::Missing, // real status arrives on first ensure/reformat
+            pending: None,
             texts: Vec::new(),
             outstanding: 0,
             decode_queue: Vec::new(),
@@ -166,6 +208,15 @@ impl Coordinator {
         self.confirm_pending = false;
         self.level_amps.clear();
         self.take_clipped = false;
+        self.pending = None;
+    }
+
+    /// Reformat is enabled by config (mode != "off"). Whether it actually runs
+    /// also requires the SKU present on disk (checked at the call site). "on" and
+    /// "auto" behave identically here; the GPU gate only picks the SKU, not
+    /// whether to run.
+    fn reformat_active(&self) -> bool {
+        self.cfg.reformat != "off"
     }
 
     /// Take metadata for the history record (DESIGN §5.2 expanded row).
@@ -291,9 +342,11 @@ impl Coordinator {
             .filter(|s| !s.is_empty())
             .collect::<Vec<_>>()
             .join(" ");
-        let text = fx.apply_replacements(&raw, self.target_hwnd);
+        // Deterministic pipeline result — ALWAYS the fallback (guardrail trip,
+        // reformat failure/timeout, model absent all inject this).
+        let det = fx.apply_replacements(&raw, self.target_hwnd);
 
-        if text.trim().is_empty() {
+        if det.trim().is_empty() {
             // Nothing was said (or all filtered) — treat as a discard, no cue.
             self.set_state(fx, HudState::Cancelled);
             self.end_session(fx);
@@ -301,6 +354,29 @@ impl Coordinator {
                 Some((fx.now() + Duration::from_millis(HUD_CANCELLED_MS), Timer::HideHud));
             return;
         }
+
+        // Reformat active AND the SKU is on disk -> hand off to the async LLM and
+        // wait (resident State::Reformatting). Otherwise inject det now (today's
+        // straight-line path). The reply lands as CoordMsg::Reformat{Done,Failed}.
+        if self.reformat_active() && fx.reformat_model_present() {
+            self.state = State::Reformatting;
+            self.pending = Some((raw, det.clone()));
+            self.set_state(fx, HudState::Reformatting);
+            fx.reformat(det, self.gen);
+            self.timer =
+                Some((fx.now() + Duration::from_millis(REFORMAT_TIMEOUT_MS), Timer::ReformatTimeout));
+            return;
+        }
+
+        let outcome = fx.inject(det.clone(), self.target_hwnd);
+        self.finish_inject(fx, raw, det, outcome, true);
+    }
+
+    /// Land a reformat outcome: inject `text`, record history against the original
+    /// `raw`, cancel the timeout, end the session. Shared by ReformatDone (after
+    /// the guardrail), ReformatFailed, and ReformatTimeout.
+    fn finish_reformat(&mut self, fx: &mut dyn Effects, raw: String, text: String) {
+        self.timer = None; // cancel ReformatTimeout (harmless if already fired)
         let outcome = fx.inject(text.clone(), self.target_hwnd);
         self.finish_inject(fx, raw, text, outcome, true);
     }
@@ -430,6 +506,22 @@ impl Coordinator {
             // Tray "Stop dictation" ends any recording.
             (State::Recording { .. }, ToggleDictation) => self.to_awaiting_tail(fx),
 
+            // Hotkey/tray press while an async reformat is in flight = "commit the
+            // current take now and start the next one". The reformat window is
+            // seconds long (up to REFORMAT_TIMEOUT_MS); without this a fast user
+            // chaining sentences hits the catch-all and loses the opening words
+            // with no cue. Inject the deterministic text immediately (the same
+            // path ReformatFailed/timeout use), then start the new session.
+            // start_recording bumps the generation, so the in-flight LLM reply
+            // lands stale and is dropped by the ReformatDone gen guard.
+            (State::Reformatting, m @ (HotkeyDown | ToggleDictation)) => {
+                let toggled = matches!(m, ToggleDictation);
+                if let Some((raw, det)) = self.pending.take() {
+                    self.finish_reformat(fx, raw, det);
+                }
+                self.start_recording(fx, toggled);
+            }
+
             // ---- Cancel -------------------------------------------------------
             (State::Recording { started_at, .. }, Cancel) => {
                 let elapsed = fx.now().duration_since(started_at).as_secs();
@@ -444,7 +536,9 @@ impl Coordinator {
                     self.cancel(fx, true);
                 }
             }
-            (State::AwaitingTail, Cancel) | (State::Decoding, Cancel) => self.cancel(fx, false),
+            (State::AwaitingTail, Cancel) | (State::Decoding, Cancel) | (State::Reformatting, Cancel) => {
+                self.cancel(fx, false)
+            }
 
             // ---- Capture pipeline --------------------------------------------
             (State::Recording { .. }, CaptureStarted) => {
@@ -520,6 +614,37 @@ impl Coordinator {
                 }
             }
 
+            // ---- Reformat results --------------------------------------------
+            (_, ReformatDone { generation, text }) => {
+                if generation != self.gen {
+                    self.dbg("stale ReformatDone dropped");
+                } else if let Some((raw, det)) = self.pending.take() {
+                    // Validate the untrusted rewrite against det; any trip falls
+                    // back to the deterministic text (the light-cleanup floor).
+                    let final_text = match crate::guardrail::check(&det, &text) {
+                        Ok(()) => text,
+                        Err(trip) => {
+                            eprintln!("coordinator: reformat guardrail trip {trip:?} — using deterministic text");
+                            det
+                        }
+                    };
+                    self.finish_reformat(fx, raw, final_text);
+                }
+                // gen matches but pending already taken (timeout fired first): ignore.
+            }
+            (_, ReformatFailed { generation, error }) => {
+                if generation == self.gen {
+                    if let Some((raw, det)) = self.pending.take() {
+                        eprintln!("coordinator: reformat failed: {error} — injecting deterministic text");
+                        self.finish_reformat(fx, raw, det);
+                    }
+                }
+            }
+            (_, ReformatModelStatus { status }) => {
+                self.reformat_status = status;
+                fx.announce_reformat_status(&self.reformat_status);
+            }
+
             // ---- Model / config / system -------------------------------------
             (_, ModelStatus(st)) => self.on_model_status(fx, st),
             (_, ConfigChanged(c)) => {
@@ -532,6 +657,22 @@ impl Coordinator {
                     if !c.unload_on_idle {
                         fx.ensure_model();
                     }
+                }
+                // Reformat enable/disable mirrors the ASR ensure/unload-on-config
+                // pattern. Warming on enable is gated on the SKU being present AND
+                // not idle-unloading — otherwise the reformatter stays lazy (it's a
+                // 1-2 GB model; PLAN §6 keeps it a never-required dependency).
+                let reformat_was_on = self.cfg.reformat != "off";
+                let reformat_now_on = c.reformat != "off";
+                if !reformat_was_on && reformat_now_on && !c.unload_on_idle && fx.reformat_model_present() {
+                    fx.ensure_reformat_model();
+                } else if reformat_was_on && !reformat_now_on {
+                    fx.unload_reformat_model();
+                }
+                // Compute-device change (auto/gpu/cpu) — the worker drops+reloads
+                // the model on next use so n_gpu_layers takes effect.
+                if c.reformat_device != self.cfg.reformat_device {
+                    fx.set_reformat_device(c.reformat_device.clone());
                 }
                 self.cfg = c;
             }
@@ -614,6 +755,14 @@ impl Coordinator {
             Timer::UnloadIdle => {
                 if self.cfg.unload_on_idle {
                     fx.unload_model();
+                    fx.unload_reformat_model();
+                }
+            }
+            Timer::ReformatTimeout => {
+                // The LLM didn't answer in time — inject the deterministic text.
+                // A late ReformatDone finds `pending` empty and is ignored.
+                if let Some((raw, det)) = self.pending.take() {
+                    self.finish_reformat(fx, raw, det);
                 }
             }
         }
@@ -697,6 +846,10 @@ mod tests {
         EscArmed(bool),
         PasteAvailable(bool),
         SetModel(String),
+        Reformat { gen: u64, det: String },
+        EnsureReformatModel,
+        UnloadReformatModel,
+        SetReformatDevice(String),
     }
 
     struct Mock {
@@ -708,6 +861,8 @@ mod tests {
         replaced: Option<String>,
         // Last take metadata passed to append_history.
         last_meta: Option<TakeMeta>,
+        // Reformat SKU present on disk? Gates whether a take reformats.
+        reformat_present: bool,
     }
 
     impl Mock {
@@ -719,6 +874,7 @@ mod tests {
                 inject: InjectOutcome::Injected { chars: 0, method: InjectMethod::Pasted },
                 replaced: None,
                 last_meta: None,
+                reformat_present: false,
             }
         }
         fn with_clock(base: Instant, offsets_ms: &[u64]) -> Self {
@@ -753,6 +909,7 @@ mod tests {
                 HudState::Transcribing => "transcribing".into(),
                 HudState::Injected { chars } => format!("injected:{chars}"),
                 HudState::Cancelled => "cancelled".into(),
+                HudState::Reformatting => "reformatting".into(),
                 HudState::Error { label, detail } => format!("error:{label} / {detail}"),
                 HudState::ConfirmDiscard => "confirm".into(),
             },
@@ -825,6 +982,21 @@ mod tests {
         }
         fn set_model(&mut self, id: String) {
             self.calls.push(Call::SetModel(id));
+        }
+        fn reformat(&mut self, det: String, generation: u64) {
+            self.calls.push(Call::Reformat { gen: generation, det });
+        }
+        fn ensure_reformat_model(&mut self) {
+            self.calls.push(Call::EnsureReformatModel);
+        }
+        fn unload_reformat_model(&mut self) {
+            self.calls.push(Call::UnloadReformatModel);
+        }
+        fn set_reformat_device(&mut self, device: String) {
+            self.calls.push(Call::SetReformatDevice(device));
+        }
+        fn reformat_model_present(&mut self) -> bool {
+            self.reformat_present
         }
         fn now(&mut self) -> Instant {
             let v = self.clock[self.clock_idx.min(self.clock.len() - 1)];
@@ -1365,5 +1537,217 @@ mod tests {
         c.handle(CoordMsg::HotkeyDown, &mut fx);
         assert!(fx.has(&Call::EnsureModel));
         assert!(fx.has(&Call::StartCapture(None))); // capture starts in parallel
+    }
+
+    // --- Reformat LLM --------------------------------------------------------
+
+    /// Drive one hold-mode take to the point the tail decode lands, returning the
+    /// session generation. `det` is the decoded text (Mock apply_replacements is
+    /// identity, so det == this text).
+    fn take_to_decode(c: &mut Coordinator, fx: &mut Mock, det: &str) -> u64 {
+        c.handle(CoordMsg::HotkeyDown, fx);
+        let g = c.gen;
+        c.handle(CoordMsg::HotkeyUp, fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: det.into() }, fx);
+        g
+    }
+
+    #[test]
+    fn reformat_happy_path_injects_rewrite() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat defaults to "auto"
+
+        let det = "so um the settings page really needs a dark mode toggle added to it";
+        let g = take_to_decode(&mut c, &mut fx, det);
+
+        // Handed to the async reformatter; HUD shows the wait; nothing injected yet.
+        assert!(fx.has(&Call::Reformat { gen: g, det: det.into() }));
+        assert_eq!(fx.huds().last().unwrap(), "reformatting");
+        assert!(matches!(c.state, State::Reformatting));
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
+
+        // A clean rewrite passes the guardrail -> inject the rewrite, record raw.
+        let rewrite = "The settings page needs a dark mode toggle.";
+        c.handle(CoordMsg::ReformatDone { generation: g, text: rewrite.into() }, &mut fx);
+        assert!(fx.has(&Call::Inject(rewrite.into())));
+        assert!(fx.has(&Call::History { raw: det.into(), text: rewrite.into(), exe: Some("editor.exe".into()) }));
+        assert_eq!(fx.huds().last().unwrap(), "injected:0");
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn reformat_guardrail_trip_falls_back_to_det() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        let det = "don't delete the old config file before you check it";
+        let g = take_to_decode(&mut c, &mut fx, det);
+
+        // A polarity-flipped rewrite trips the guardrail -> inject det, never the LLM out.
+        let bad = "Delete the old config file before you check it.";
+        c.handle(CoordMsg::ReformatDone { generation: g, text: bad.into() }, &mut fx);
+        assert!(fx.has(&Call::Inject(det.into())));
+        assert!(!fx.has(&Call::Inject(bad.into())));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn reformat_failed_falls_back_to_det() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        let det = "commit this and push it to the main branch right now";
+        let g = take_to_decode(&mut c, &mut fx, det);
+        assert!(fx.has(&Call::Reformat { gen: g, det: det.into() }));
+
+        c.handle(CoordMsg::ReformatFailed { generation: g, error: "model not loaded".into() }, &mut fx);
+        assert!(fx.has(&Call::Inject(det.into())));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn reformat_timeout_falls_back_to_det() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        let det = "refactor the parser to handle empty input and add a test";
+        take_to_decode(&mut c, &mut fx, det);
+        assert!(matches!(c.state, State::Reformatting));
+
+        // The reformat-timeout fires before any reply -> inject det.
+        c.fire_timer(&mut fx);
+        assert!(fx.has(&Call::Inject(det.into())));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn cancel_during_reformat_drops_stale_reply() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+
+        let det = "cache the sessions in postgres a regular table is fine";
+        let g = take_to_decode(&mut c, &mut fx, det);
+        assert!(matches!(c.state, State::Reformatting));
+
+        // Esc during the wait: cancel bumps the generation, nothing injected.
+        c.handle(CoordMsg::Cancel, &mut fx);
+        assert!(matches!(c.state, State::Idle));
+        assert_ne!(c.gen, g);
+        assert_eq!(fx.huds().last().unwrap(), "cancelled");
+
+        // The now-stale reply arrives — dropped, nothing injected.
+        c.handle(CoordMsg::ReformatDone { generation: g, text: "some rewrite".into() }, &mut fx);
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Inject(_))));
+    }
+
+    #[test]
+    fn hotkey_during_reformat_commits_and_starts_next() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat "auto"
+
+        let det = "commit this now and start the next sentence";
+        let g = take_to_decode(&mut c, &mut fx, det);
+        assert!(matches!(c.state, State::Reformatting));
+        assert!(fx.has(&Call::Reformat { gen: g, det: det.into() }));
+
+        // A hotkey press mid-reformat commits det AND opens a fresh take.
+        fx.calls.clear();
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        assert!(fx.has(&Call::Inject(det.into()))); // committed the pending take
+        assert!(fx.has(&Call::StartCapture(None))); // next take is capturing
+        assert!(matches!(c.state, State::Recording { .. }));
+        assert_ne!(c.gen, g); // generation bumped -> in-flight reply now stale
+
+        // The late reformat reply arrives stale and is dropped, not injected.
+        c.handle(CoordMsg::ReformatDone { generation: g, text: "reformatted rewrite".into() }, &mut fx);
+        assert!(!fx.has(&Call::Inject("reformatted rewrite".into())));
+    }
+
+    #[test]
+    fn reformat_model_absent_injects_det_directly() {
+        let mut fx = Mock::new(Instant::now()); // reformat_present = false
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat "auto"
+
+        let g = take_to_decode(&mut c, &mut fx, "hello world");
+        let _ = g;
+        // No reformat attempt when the SKU isn't on disk — det injected straight away.
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Reformat { .. })));
+        assert!(fx.has(&Call::Inject("hello world".into())));
+        assert!(matches!(c.state, State::Idle));
+    }
+
+    #[test]
+    fn reformat_off_skips_reformat_even_when_present() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let mut config = cfg(HotkeyMode::Hold);
+        config.reformat = "off".into();
+        let mut c = Coordinator::new(config);
+
+        take_to_decode(&mut c, &mut fx, "hello world");
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::Reformat { .. })));
+        assert!(fx.has(&Call::Inject("hello world".into())));
+    }
+
+    #[test]
+    fn idle_unload_also_unloads_reformat_model() {
+        let mut fx = Mock::new(Instant::now());
+        let mut c = Coordinator::new(Config {
+            hotkey_mode: HotkeyMode::Hold,
+            unload_on_idle: true,
+            ..Default::default()
+        });
+        // Reformat inactive here (present=false) — a plain ASR take to the hide path.
+        let g = take_to_decode(&mut c, &mut fx, "hi there");
+        let _ = g;
+        assert!(fx.has(&Call::Inject("hi there".into())));
+
+        c.fire_timer(&mut fx); // HideHud -> fade
+        c.fire_timer(&mut fx); // HideWindow -> hide + arm idle-unload
+        c.fire_timer(&mut fx); // UnloadIdle -> both models unload
+        assert!(fx.has(&Call::UnloadModel));
+        assert!(fx.has(&Call::UnloadReformatModel));
+    }
+
+    #[test]
+    fn config_toggle_warms_and_unloads_reformat_model() {
+        let mut fx = Mock::new(Instant::now());
+        fx.reformat_present = true;
+        let off = Config { reformat: "off".into(), ..cfg(HotkeyMode::Hold) };
+        let on = cfg(HotkeyMode::Hold); // reformat defaults to "auto"
+        let mut c = Coordinator::new(off.clone());
+
+        // off -> on, SKU present, no idle-unload: warm the reformat model.
+        c.handle(CoordMsg::ConfigChanged(on), &mut fx);
+        assert!(fx.has(&Call::EnsureReformatModel));
+
+        // on -> off: unload it.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(off), &mut fx);
+        assert!(fx.has(&Call::UnloadReformatModel));
+        assert!(!fx.has(&Call::EnsureReformatModel));
+    }
+
+    #[test]
+    fn config_device_change_routes_to_engine() {
+        let mut fx = Mock::new(Instant::now());
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat_device "auto"
+        let to_cpu = Config { reformat_device: "cpu".into(), ..cfg(HotkeyMode::Hold) };
+
+        // auto -> cpu: route the new device to the engine.
+        c.handle(CoordMsg::ConfigChanged(to_cpu.clone()), &mut fx);
+        assert!(fx.has(&Call::SetReformatDevice("cpu".into())));
+
+        // cpu -> cpu (unchanged): no spurious device call.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(to_cpu), &mut fx);
+        assert!(!fx.has(&Call::SetReformatDevice("cpu".into())));
     }
 }

@@ -206,7 +206,9 @@ function buildModelSection(ctx: Ctx): HTMLElement {
   // Rebuilt wholesale on every status/info change — a handful of nodes.
   function update() {
     cards.innerHTML = "";
-    for (const m of ctx.models) {
+    // ASR SKUs only — LLM (reformatter) SKUs render in their own section and
+    // must never write config.modelId.
+    for (const m of ctx.models.filter((m) => m.kind === "asr")) {
       const isActive = m.id === ctx.config.modelId;
       const stat = h("span", { class: "stat" });
       const dlSlot = h("div");
@@ -275,6 +277,137 @@ function buildModelSection(ctx: Ctx): HTMLElement {
     }),
   ]);
   return sect("MODEL", "THE ONLY DOWNLOADS DICTUM WILL EVER MAKE.", body);
+}
+
+// ---------------------------------------------------------------------------
+// REFORMATTER — LLM rewrite of the deterministic ASR text (0.3).
+// ---------------------------------------------------------------------------
+const REFORMAT_MODES: [string, string, string][] = [
+  ["auto", "AUTO", "GPU-GATED. REWRITES WHEN A MODEL IS PRESENT."],
+  ["on", "ON", "ALWAYS REWRITE WHEN A MODEL IS PRESENT."],
+  ["off", "OFF", "NEVER REWRITE. DETERMINISTIC ONLY."],
+];
+
+const REFORMAT_DEVICES: [string, string, string][] = [
+  ["auto", "AUTO", "MATCH THE GPU GATE."],
+  ["gpu", "GPU", "ALWAYS OFFLOAD (VULKAN BUILD)."],
+  ["cpu", "CPU", "ALWAYS RUN ON CPU."],
+];
+
+function buildReformatSection(ctx: Ctx): HTMLElement {
+  // Mode: AUTO / ON / OFF — same radio grammar as the hotkey mode.
+  const radios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter mode" });
+  for (const [val, label, desc] of REFORMAT_MODES) {
+    const input = h("input", { type: "radio", name: "reformat-mode", value: val });
+    input.checked = ctx.config.reformat === val;
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      ctx.config.reformat = val as typeof ctx.config.reformat;
+      ctx.persistNow();
+    });
+    radios.append(
+      h("label", { class: "radio" }, [
+        input,
+        h("span", { class: "box" }),
+        h("span", { class: "label" }, label),
+        h("span", { class: "value-sm desc" }, desc),
+      ]),
+    );
+  }
+
+  // Device: AUTO / GPU / CPU — where the reformatter runs. GPU is faster; CPU
+  // spares the GPU (e.g. on battery). Only bites on a Vulkan build.
+  const deviceRadios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter device" });
+  for (const [val, label, desc] of REFORMAT_DEVICES) {
+    const input = h("input", { type: "radio", name: "reformat-device", value: val });
+    input.checked = ctx.config.reformatDevice === val;
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      ctx.config.reformatDevice = val as typeof ctx.config.reformatDevice;
+      ctx.persistNow();
+    });
+    deviceRadios.append(
+      h("label", { class: "radio" }, [
+        input,
+        h("span", { class: "box" }),
+        h("span", { class: "label" }, label),
+        h("span", { class: "value-sm desc" }, desc),
+      ]),
+    );
+  }
+
+  // One-line AUTO explanation: which SKU the GPU gate picked on this machine.
+  const g = ctx.gpu;
+  const gpuLine = g
+    ? g.offerGpu3b
+      ? `AUTO ON THIS MACHINE → 3B ON GPU · ${g.vramMb} MB VRAM.`
+      : `AUTO ON THIS MACHINE → 1.5B ON CPU · ${g.vramMb} MB VRAM.`
+    : "AUTO PICKS A SKU BY GPU — PROBING…";
+
+  // LLM SKU cards. The gate pick (larger SKU on GPU, else smaller on CPU) is the
+  // ink-full card and carries the live reformat status; the other is dimmed.
+  const cards = h("div", { class: "model-cards", role: "list", "aria-label": "Reformat models" });
+  function update() {
+    cards.innerHTML = "";
+    const llms = ctx.models.filter((m) => m.kind === "llm");
+    const bySize = [...llms].sort((a, b) => b.sizeMb - a.sizeMb); // [3B, 1.5B]
+    const chosenId = g ? (g.offerGpu3b ? bySize[0]?.id : bySize[bySize.length - 1]?.id) : undefined;
+
+    for (const m of llms) {
+      const isChosen = m.id === chosenId;
+      const stat = h("span", { class: "stat" });
+      const dlSlot = h("div");
+      const card = h("div", {
+        class: isChosen ? "model-card" : "model-card inactive",
+        role: "listitem",
+      }, [
+        h("div", { class: "head" }, [h("span", { class: "name" }, m.display), stat]),
+        h("div", { class: "value-sm line2" }, `${m.sizeMb} MB · ${m.langs} · LLAMA.CPP`),
+        dlSlot,
+      ]);
+
+      if (isChosen && m.present) {
+        // STANDBY (not an error): present on disk, recognizer lazy-loads on first
+        // reformat.
+        switch (ctx.reformatStatus.k) {
+          case "ready": stat.textContent = "● LOADED"; break;
+          case "unloaded": stat.textContent = "○ STANDBY"; break;
+          case "loading": stat.textContent = `WARMING UP · ${ctx.reformatStatus.pct}%`; break;
+          case "error": stat.textContent = "MODEL ERROR"; break;
+          case "missing": stat.textContent = "NOT ON THIS MACHINE"; break;
+        }
+      } else {
+        stat.textContent = m.present ? "ON THIS MACHINE" : "NOT ON THIS MACHINE";
+      }
+
+      if (!m.present) {
+        const slot = h("div", { class: "dl" });
+        slot.append(
+          h("button", {
+            class: "btn",
+            onclick: () =>
+              runDownloadFlow(m.id, slot, m.sizeMb, () => {
+                void api.modelInfo().then((info) => { ctx.models = info; update(); });
+                void api.getReformatStatus().then((s) => { ctx.reformatStatus = s; update(); });
+              }),
+          }, `FETCH THE MODEL · ${m.sizeMb} MB`),
+        );
+        dlSlot.append(slot);
+      }
+      cards.append(card);
+    }
+  }
+  update();
+  ctx.reformatCardUpdate = update;
+
+  const body = h("div", {}, [
+    radios,
+    h("div", { class: "value-sm sect-note" }, gpuLine),
+    h("div", { class: "value-sm sect-note" }, "COMPUTE — GPU IS FASTER; CPU SPARES THE GPU ON BATTERY."),
+    deviceRadios,
+    cards,
+  ]);
+  return sect("REFORMATTER", "A LOCAL LLM REWRITE OF THE ASR TEXT. RAW STAYS ON THE TAPE.", body);
 }
 
 // ---------------------------------------------------------------------------
@@ -545,6 +678,7 @@ export function renderSetup(ctx: Ctx, host: HTMLElement): void {
     buildKeySection(ctx),
     buildInputSection(ctx),
     buildModelSection(ctx),
+    buildReformatSection(ctx),
     buildPrivacySection(ctx),
     buildInjectionSection(ctx),
     buildProjectsSection(ctx),

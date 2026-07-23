@@ -10,13 +10,17 @@ mod commands;
 mod config;
 mod coordinator;
 mod filetag;
+mod gpu;
+mod guardrail;
 mod history;
 mod hotkey;
 mod inject;
 mod model;
 mod overlay;
+mod reformat;
 mod replacements;
 mod tray;
+mod voice;
 
 use std::sync::{mpsc::Sender, Arc, Mutex};
 use std::time::Instant;
@@ -25,7 +29,9 @@ use tauri::{ipc::Channel, AppHandle, Emitter, Manager};
 use crate::audio::Cue;
 use crate::coordinator::{CueKind, Effects};
 use crate::tray::TrayState;
-use crate::types::{Config, CoordMsg, HudEvent, HudState, InjectOutcome, ModelStatus, ModelStatusDto, TakeMeta};
+use crate::types::{
+    Config, CoordMsg, GpuInfoDto, HudEvent, HudState, InjectOutcome, ModelStatus, ModelStatusDto, TakeMeta,
+};
 
 /// Fan-out of HUD events to every subscribed webview (overlay + Settings level
 /// lane). Dead channels are dropped on the next broadcast.
@@ -54,10 +60,26 @@ pub struct AppState {
     /// Last announced model status (SETUP model card reads it at boot; live
     /// updates arrive on the `model://status` event).
     pub model_status: Arc<Mutex<ModelStatusDto>>,
+    /// Reformat (LLM) model status — parallel to `model_status`, never conflated
+    /// with the ASR engine. Live updates on `reformat://status`.
+    pub reformat_status: Arc<Mutex<ModelStatusDto>>,
+    /// GPU capability probed once at startup (SETUP reformatter section).
+    pub gpu: GpuInfoDto,
 }
 
 /// The concrete `Effects` the coordinator calls out through. Keeps coordinator.rs
 /// free of Tauri/Win32 calls (it can be unit-tested against a mock Effects).
+/// Resolve the reformat device setting to a use-GPU bool. "auto" follows the GPU
+/// soft-gate (offer_gpu_3b); "gpu"/"cpu" force it. reformat.rs still ANDs this
+/// with the vulkan feature, so a CPU build never offloads regardless.
+fn resolve_reformat_use_gpu(device: &str, offer_gpu_3b: bool) -> bool {
+    match device {
+        "gpu" => true,
+        "cpu" => false,
+        _ => offer_gpu_3b,
+    }
+}
+
 struct RealEffects {
     app: AppHandle,
     hud: HudBroadcaster,
@@ -65,10 +87,17 @@ struct RealEffects {
     cues: audio::Cues,
     audio: audio::AudioPipeline,
     asr: asr::AsrEngine,
+    /// LLM reformatter worker (own thread; llama ctx is !Send). Fire-and-forget.
+    reformat: reformat::ReformatEngine,
+    /// The GPU-gated reformat SKU this session uses (path + presence check).
+    reformat_spec: &'static model::ModelSpec,
+    /// Capable-dGPU signal from the startup probe; resolves reformat_device="auto".
+    reformat_offer_gpu: bool,
     history: Arc<Mutex<history::History>>,
     config: Arc<Mutex<Config>>,
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
     model_status: Arc<Mutex<ModelStatusDto>>,
+    reformat_status: Arc<Mutex<ModelStatusDto>>,
     /// FILE TAG index over config.project_roots; rebuilt in the background at
     /// every session start (capture_foreground), read at apply_replacements.
     file_index: Arc<Mutex<filetag::Index>>,
@@ -182,7 +211,18 @@ impl Effects for RealEffects {
     }
     fn apply_replacements(&mut self, raw: &str, target_hwnd: isize) -> String {
         let cfg = self.config.lock().unwrap().clone();
-        let text = crate::replacements::apply(raw, &cfg);
+        // Deterministic pipeline order (PLAN §6): voice commands FIRST (they edit
+        // the spoken transcript), then replacements/snippets, then file tagging.
+        let voiced = crate::voice::apply(raw);
+        // ponytail: {cursor} caret placement is reserved, not wired. apply() strips
+        // the sentinel so text integrity is correct; the caret offset (from
+        // apply_with_cursor) is dropped here on purpose. Positioning it means firing
+        // N LEFT arrows after inject, which the inject path can't do reliably —
+        // Ctrl+V paste completes asynchronously (arrows would race the paste), the
+        // backend varies per app, and the elevated / focus-changed paths are
+        // clipboard-only with no caret at all. Wire it (thread the offset through
+        // Effects::inject) only once inject gains a synchronous paste-complete signal.
+        let text = crate::replacements::apply(&voiced, &cfg);
         if cfg.project_roots.is_empty() {
             return text;
         }
@@ -202,6 +242,34 @@ impl Effects for RealEffects {
     }
     fn set_model(&mut self, id: String) {
         self.asr.set_model(id);
+    }
+    // --- Reformat LLM ------------------------------------------------------
+    fn reformat(&mut self, det: String, generation: u64) {
+        self.reformat.reformat(det, generation);
+    }
+    fn ensure_reformat_model(&mut self) {
+        self.reformat.ensure();
+    }
+    fn unload_reformat_model(&mut self) {
+        self.reformat.unload();
+    }
+    fn set_reformat_model(&mut self, id: String) {
+        // No config field selects the reformat SKU (it's GPU-gated at startup), so
+        // this is rarely called; kept for the Effects contract. Repoint the worker.
+        self.reformat_spec = model::reformat_spec(&id);
+        self.reformat.set_model(model::single_file_path(self.reformat_spec));
+    }
+    fn reformat_model_present(&mut self) -> bool {
+        model::files_present(self.reformat_spec)
+    }
+    fn set_reformat_device(&mut self, device: String) {
+        self.reformat
+            .set_use_gpu(resolve_reformat_use_gpu(&device, self.reformat_offer_gpu));
+    }
+    fn announce_reformat_status(&mut self, st: &ModelStatus) {
+        let dto = ModelStatusDto::from(st);
+        *self.reformat_status.lock().unwrap() = dto.clone();
+        let _ = self.app.emit("reformat://status", dto);
     }
     fn now(&mut self) -> Instant {
         Instant::now()
@@ -233,6 +301,8 @@ pub fn run() {
             commands::paste_last,
             commands::toggle_dictation,
             commands::get_model_status,
+            commands::get_reformat_status,
+            commands::get_gpu_info,
             commands::import_replacements,
             commands::export_replacements,
             commands::subscribe_hud,
@@ -264,6 +334,33 @@ pub fn run() {
 
             let audio = audio::AudioPipeline::new(tx.clone(), vad_path);
             let asr = asr::AsrEngine::new(tx.clone(), init_cfg.model_id.clone());
+
+            // GPU probe (once) decides the reformat SKU: 3B on a capable dGPU,
+            // else 1.5B CPU. The worker points at the SKU's GGUF but loads it
+            // lazily on the first reformat — never at boot (2-4 GB).
+            let gpu_info = gpu::probe();
+            let gpu_dto = GpuInfoDto { vram_mb: gpu_info.vram_mb, offer_gpu_3b: gpu_info.offer_gpu_3b };
+            // 3B auto-pick requires the vulkan build; CPU-only builds cap at 1.5B.
+            // Without the vulkan feature reformat.rs sets n_gpu_layers=0, so a 3B
+            // picked on VRAM alone runs entirely on CPU (~4-13s) — the exact
+            // regression the soft-gate exists to avoid. Explicit reformat="on"
+            // still honors the GPU pick so a user can deliberately override.
+            let offer_3b =
+                gpu_info.offer_gpu_3b && (cfg!(feature = "vulkan") || init_cfg.reformat == "on");
+            let reformat_spec = model::reformat_spec(model::reformat_id_for_gpu(offer_3b));
+            // Initial offload follows the reformat_device setting ("auto" = the
+            // soft-gate signal that picks the 3B SKU); reformat.rs also requires
+            // the vulkan feature, so CPU/iGPU machines stay on CPU. The user can
+            // flip device at runtime via config (fx.set_reformat_device).
+            let init_use_gpu =
+                resolve_reformat_use_gpu(&init_cfg.reformat_device, gpu_info.offer_gpu_3b);
+            let reformat = reformat::ReformatEngine::new(tx.clone(), init_use_gpu);
+            // The worker is pointed at the SKU below via fx.set_reformat_model once
+            // fx exists — startup and config-swap share the same Effects seam.
+            // Offline sideload: install a hand-dropped reformat .gguf if present.
+            // Install only (no load) so the reformatter stays lazy.
+            std::thread::spawn(model::sideload_reformat_gguf);
+
             let cues = audio::Cues::new(&res_dir, init_cfg.audio_cues);
             let history = Arc::new(Mutex::new(
                 history::History::open(&init_cfg).expect("open history.db"),
@@ -293,6 +390,13 @@ pub fn run() {
             } else {
                 ModelStatusDto::Missing
             }));
+            // Reformat model is lazy: present-on-disk reads as Unloaded (not Ready)
+            // until the first reformat loads it; absent reads as Missing.
+            let reformat_status = Arc::new(Mutex::new(if model::files_present(reformat_spec) {
+                ModelStatusDto::Unloaded
+            } else {
+                ModelStatusDto::Missing
+            }));
 
             app.manage(AppState {
                 config: config.clone(),
@@ -301,6 +405,8 @@ pub fn run() {
                 history: history.clone(),
                 hotkey: hotkey.clone(),
                 model_status: model_status.clone(),
+                reformat_status: reformat_status.clone(),
+                gpu: gpu_dto,
             });
 
             // Warm the active model unless it's missing (missing -> first hotkey
@@ -343,13 +449,21 @@ pub fn run() {
                 cues,
                 audio,
                 asr,
+                reformat,
+                reformat_spec,
+                reformat_offer_gpu: gpu_info.offer_gpu_3b,
                 history,
                 config,
                 hotkey: hotkey.clone(),
                 model_status,
+                reformat_status,
                 file_index,
                 overlay_click_through: true, // overlay::setup made it click-through
             };
+            // Point the reformat worker at the GPU-gated SKU (lazy-loaded on first
+            // use). Routed through the Effects seam so startup and any config swap
+            // share one path.
+            fx.set_reformat_model(reformat_spec.id.into());
             std::thread::spawn(move || {
                 coordinator::Coordinator::run(rx, &mut fx, init_cfg);
             });

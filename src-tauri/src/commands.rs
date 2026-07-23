@@ -5,8 +5,8 @@ use tauri::ipc::Channel;
 use tauri::{AppHandle, Emitter, State};
 
 use crate::types::{
-    Config, CoordMsg, DownloadProgress, HistoryRecord, HudEvent, ModelInfo, ModelStatus,
-    ModelStatusDto, Replacement,
+    Config, CoordMsg, DownloadProgress, GpuInfoDto, HistoryRecord, HudEvent, ModelInfo, ModelKind,
+    ModelStatus, ModelStatusDto, Replacement,
 };
 use crate::AppState;
 
@@ -50,16 +50,30 @@ pub fn download_model(id: String, progress: Channel<DownloadProgress>, state: St
     let spec = crate::model::spec(&id);
     let tx = state.coord_tx.lock().unwrap().clone();
     let active = state.config.lock().unwrap().model_id == spec.id;
+    let kind = spec.kind;
     // Blocking download (the app's only network path) — off the IPC thread.
-    // On completion, tell the coordinator the model is usable (recognizer
-    // lazy-loads on first decode via asr::ensure) — but only if the download
-    // was for the ACTIVE model; fetching the other SKU changes nothing live.
+    // On completion, tell the coordinator so the SETUP card refreshes without a
+    // restart:
+    //   - ASR active model: now usable (recognizer lazy-loads on first decode via
+    //     asr::ensure). Only the ACTIVE model changes anything live.
+    //   - LLM (reformat) SKU: mirror the boot 'present => Unloaded' rule so the
+    //     card flips to STANDBY (an LLM id is never the active ASR model, so the
+    //     `active` branch above never covers it and state.reformat_status would
+    //     otherwise stay Missing until the first reformat or an app restart).
     std::thread::spawn(move || {
         crate::model::download(spec, move |p| {
             let done = matches!(p, DownloadProgress::Done);
             let _ = progress.send(p);
-            if done && active {
-                let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Ready));
+            if done {
+                match kind {
+                    ModelKind::Asr if active => {
+                        let _ = tx.send(CoordMsg::ModelStatus(ModelStatus::Ready));
+                    }
+                    ModelKind::Llm => {
+                        let _ = tx.send(CoordMsg::ReformatModelStatus { status: ModelStatus::Unloaded });
+                    }
+                    _ => {}
+                }
             }
         });
     });
@@ -101,6 +115,19 @@ pub fn toggle_dictation(state: State<AppState>) {
 #[tauri::command]
 pub fn get_model_status(state: State<AppState>) -> ModelStatusDto {
     state.model_status.lock().unwrap().clone()
+}
+
+/// Boot-time reformat (LLM) model status; live updates on `reformat://status`.
+#[tauri::command]
+pub fn get_reformat_status(state: State<AppState>) -> ModelStatusDto {
+    state.reformat_status.lock().unwrap().clone()
+}
+
+/// GPU capability probed at startup — SETUP reformatter section shows which SKU
+/// the gate picked (offerGpu3b => 3B, else 1.5B CPU).
+#[tauri::command]
+pub fn get_gpu_info(state: State<AppState>) -> GpuInfoDto {
+    state.gpu.clone()
 }
 
 #[tauri::command]

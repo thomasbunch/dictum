@@ -1,6 +1,6 @@
 [package]
 name = "dictum"
-version = "0.2.0"
+version = "0.3.0"
 description = "Local, CPU-only, push-to-talk dictation for Windows"
 license = "Apache-2.0"
 edition = "2021"
@@ -12,8 +12,14 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 [features]
 # Embed dist/ and serve via the custom protocol. Without this a plain
 # `cargo build` produces a dev-mode exe that dials the Vite dev server.
-default = ["custom-protocol"]
+default = ["custom-protocol", "reformat-llm"]
 custom-protocol = ["tauri/custom-protocol"]
+# LLM reformatter (llama.cpp native build). On by default; --no-default-features
+# drops the native build and reformat.rs uses its deterministic stub path.
+reformat-llm = ["dep:llama-cpp-2"]
+# Offload all layers to the GPU (Vulkan). NOT built tonight â€” needs the Vulkan
+# SDK installed; CPU default is n_gpu_layers=0.
+vulkan = ["llama-cpp-2/vulkan"]
 
 [build-dependencies]
 tauri-build = { version = "2.6.3", features = [] }
@@ -47,6 +53,10 @@ windows = { version = "0.62.2", features = [
   "Win32_Security",
   "Win32_System_RemoteDesktop",
   "Win32_System_Power",
+  # GPU probe (gpu.rs): DXGI adapter enum + D3D12 device create.
+  "Win32_Graphics_Dxgi",
+  "Win32_Graphics_Direct3D",
+  "Win32_Graphics_Direct3D12",
 ] }
 windows-registry = "0.6"
 
@@ -65,6 +75,11 @@ regex = "1"
 
 # File tagging (gitignore-aware project walk)
 ignore = "0.4"
+
+# LLM reformatter (feature-gated behind `reformat-llm` so --no-default-features
+# still builds without the llama.cpp native toolchain). Pinned to the version
+# reformat.rs was written against.
+llama-cpp-2 = { version = "0.1.152", optional = true }
 
 [profile.release]
 lto = "thin"

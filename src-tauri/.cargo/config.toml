@@ -1,3 +1,24 @@
 # sherpa-onnx prebuilt static libs are /MT (static CRT); match it or linking fails.
 [target.x86_64-pc-windows-msvc]
 rustflags = ["-C", "target-feature=+crt-static"]
+
+# llama-cpp-sys-2 (reformat-llm) compiles llama.cpp via cmake — force its native
+# objects to the SAME static MSVC runtime (/MT) as the +crt-static rustflag above,
+# or the link fails (unresolved __imp_* / LNK2038 RuntimeLibrary mismatch: dynamic
+# -CRT llama objects vs static-CRT sherpa + rust std). This is PLAN §5.7's flagged
+# build risk.
+#
+#  - LLAMA_STATIC_CRT: builds llama-cpp-sys-2's own cc-compiled wrapper stubs /MT.
+#  - CMAKE_MSVC_RUNTIME_LIBRARY: llama-cpp-sys-2 forwards every CMAKE_* env var as a
+#    -D define, so this drives the actual llama.cpp/ggml cmake objects to static /MT.
+#    Needed on top of LLAMA_STATIC_CRT because llama.cpp requires CMake >=3.15
+#    (CMP0091 NEW), where this variable — not the injected /MT flag — decides the
+#    runtime, and its default is the DLL (/MD) runtime.
+#  - CMP0091 NEW pinned so the variable above is honored regardless of policy default.
+# force=true so a value already exported in the process env (e.g. a shell/CI
+# default of CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL) can't silently win and
+# reintroduce the /MD-vs-/MT LNK2038 break this file exists to prevent.
+[env]
+LLAMA_STATIC_CRT = { value = "1", force = true }
+CMAKE_MSVC_RUNTIME_LIBRARY = { value = "MultiThreaded", force = true }
+CMAKE_POLICY_DEFAULT_CMP0091 = { value = "NEW", force = true }

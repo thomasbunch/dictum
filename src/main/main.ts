@@ -5,7 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { getVersion } from "@tauri-apps/api/app";
 import { api } from "../bindings";
-import type { Config, HistoryRecord, HudState, ModelInfo, ModelStatus, Retention } from "../bindings";
+import type { Config, GpuInfoDto, HistoryRecord, HudState, ModelInfo, ModelStatus, Retention } from "../bindings";
 import { h, initTheme, mountError, debounce } from "../shared";
 import { renderTape } from "./tape";
 import { renderWords } from "./words";
@@ -17,6 +17,10 @@ export interface Ctx {
   config: Config;
   models: ModelInfo[];
   modelStatus: ModelStatus;
+  /** Reformat (LLM) model status — parallel to modelStatus, own event. */
+  reformatStatus: ModelStatus;
+  /** GPU capability probed at startup; drives the AUTO gate explanation. */
+  gpu: GpuInfoDto | null;
   devices: string[];
   records: HistoryRecord[];
   totalLines: number;
@@ -32,6 +36,8 @@ export interface Ctx {
   /** Set by SETUP while visible: live mic meter fill + model card updater. */
   meterFill: HTMLElement | null;
   modelCardUpdate: (() => void) | null;
+  /** Set by SETUP while visible: repaints the reformat cards on status change. */
+  reformatCardUpdate: (() => void) | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,6 +140,8 @@ const ctx: Ctx = {
   config: undefined as unknown as Config,
   models: [],
   modelStatus: { k: "missing" },
+  reformatStatus: { k: "missing" },
+  gpu: null,
   devices: [],
   records: [],
   totalLines: 0,
@@ -157,6 +165,7 @@ const ctx: Ctx = {
   updateFooter,
   meterFill: null,
   modelCardUpdate: null,
+  reformatCardUpdate: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -288,7 +297,10 @@ function renderMasthead(): void {
 
   mastheadEl.append(h("div", { class: "value status-line" }, statusLine()));
 
-  const present = ctx.models[0]?.present ?? false;
+  // Gate on the ACTIVE model's presence, not registry[0] (always the v2 SKU):
+  // a config pointing at v3 with v2 absent must not force the first-run fetch
+  // while the status line already reads MODEL LOADED · V3.
+  const present = activeModel(ctx)?.present ?? false;
   if (!present) {
     // First run (§5.5): the masthead carries the fetch.
     const active = activeModel(ctx);
@@ -336,6 +348,7 @@ function updateFooter(): void {
 function renderView(): void {
   ctx.meterFill = null;
   ctx.modelCardUpdate = null;
+  ctx.reformatCardUpdate = null;
   viewEl.innerHTML = "";
   if (currentView === "tape") renderTape(ctx, viewEl);
   else if (currentView === "words") renderWords(ctx, viewEl);
@@ -372,6 +385,7 @@ function announce(s: HudState): void {
       case "transcribing": return "PRINTING";
       case "injected": return `PRINTED · ${s.chars} CH`;
       case "cancelled": return "KILLED";
+      case "reformatting": return "REFORMATTING";
       case "confirm_discard": return "HOLD ON — ESC AGAIN KILLS THE TAKE";
       case "error": return `${s.label} — ${s.detail}`;
     }
@@ -433,14 +447,18 @@ async function main() {
     updateFooter();
   });
 
-  const [models, status, devices, version] = await Promise.all([
+  const [models, status, reformatStatus, gpu, devices, version] = await Promise.all([
     api.modelInfo(),
     api.getModelStatus(),
+    api.getReformatStatus(),
+    api.getGpuInfo(),
     api.listInputDevices(),
     getVersion().catch(() => "0.1.0"),
   ]);
   ctx.models = models;
   ctx.modelStatus = status;
+  ctx.reformatStatus = reformatStatus;
+  ctx.gpu = gpu;
   ctx.devices = devices;
   ctx.version = version;
   await ctx.reloadHistory(null);
@@ -457,6 +475,11 @@ async function main() {
     ctx.modelStatus = e.payload;
     if (currentView === "tape") renderMasthead();
     ctx.modelCardUpdate?.();
+  });
+  // Reformat (LLM) model status — parallel to model://status, own SETUP cards.
+  await listen<ModelStatus>("reformat://status", (e) => {
+    ctx.reformatStatus = e.payload;
+    ctx.reformatCardUpdate?.();
   });
   // A new line printed (§5.2): reload; the tape re-renders with ink-dry.
   const onHistoryChanged = debounce(() => {

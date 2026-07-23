@@ -7,3 +7,7 @@ src-tauri/gen/
 NEEDS.md
 RESEARCH.json
 docs/
+finetune/.venv/
+finetune/out/
+finetune/data/staging/
+finetune/data/backup-*/
