@@ -28,6 +28,9 @@ const N_BATCH: usize = 512;
 enum ReformatCmd {
     /// Point at a GGUF file. Drops the loaded model if the path differs.
     SetModel(PathBuf),
+    /// Change the compute device (GPU offload on/off). Drops the loaded model if
+    /// it changed — n_gpu_layers is fixed at load, so the next use reloads.
+    SetUseGpu(bool),
     /// Warm-load the model up front (emits Loading -> Ready / Missing / Error).
     Ensure,
     /// Reformat one deterministic-pipeline result. `generation` is echoed back
@@ -56,6 +59,12 @@ impl ReformatEngine {
         let _ = self.tx.send(ReformatCmd::SetModel(path));
     }
 
+    /// Switch GPU offload on/off (config reformat_device). Takes effect on the
+    /// next reformat (the current model, if any, is dropped and reloaded).
+    pub fn set_use_gpu(&self, use_gpu: bool) {
+        let _ = self.tx.send(ReformatCmd::SetUseGpu(use_gpu));
+    }
+
     /// Warm-load the model (emits Loading{0/50/100} -> Ready, or Missing/Error).
     pub fn ensure(&self) {
         let _ = self.tx.send(ReformatCmd::Ensure);
@@ -78,6 +87,7 @@ fn run(rx: Receiver<ReformatCmd>, tx: Sender<CoordMsg>, use_gpu: bool) {
     while let Ok(cmd) = rx.recv() {
         match cmd {
             ReformatCmd::SetModel(path) => state.set_model(path),
+            ReformatCmd::SetUseGpu(g) => state.set_use_gpu(g),
             ReformatCmd::Ensure => {
                 if state.is_loaded() {
                     let _ = tx.send(CoordMsg::ReformatModelStatus { status: ModelStatus::Ready });
@@ -156,6 +166,15 @@ impl State {
             self.model_path = Some(path);
             // Drop the old model (frees GBs). Caller decides whether to warm the
             // new one (ensure follows unless unload_on_idle). No status here.
+            self.model = None;
+        }
+    }
+
+    fn set_use_gpu(&mut self, use_gpu: bool) {
+        if self.use_gpu != use_gpu {
+            self.use_gpu = use_gpu;
+            // n_gpu_layers is fixed at load — drop so the next ensure reloads on
+            // the newly-selected device.
             self.model = None;
         }
     }
@@ -306,6 +325,7 @@ impl State {
         false
     }
     fn set_model(&mut self, _path: PathBuf) {}
+    fn set_use_gpu(&mut self, _use_gpu: bool) {}
     fn ensure(&mut self, tx: &Sender<CoordMsg>) -> bool {
         let _ = tx.send(CoordMsg::ReformatModelStatus { status: ModelStatus::Missing });
         false

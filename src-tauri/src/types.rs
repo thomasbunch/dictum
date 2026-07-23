@@ -170,6 +170,10 @@ pub struct Config {
     /// "on"/"auto" reformat whenever a reformat model is present on disk (the SKU
     /// is auto-picked by the GPU gate at startup). Old configs default to "auto".
     pub reformat: String,
+    /// Reformat compute device: "auto" | "gpu" | "cpu". "auto" follows the GPU
+    /// soft-gate; "gpu"/"cpu" force it. Only meaningful on a Vulkan build — a CPU
+    /// build always runs on CPU. Old configs default to "auto".
+    pub reformat_device: String,
 }
 
 impl Default for Config {
@@ -190,6 +194,7 @@ impl Default for Config {
             project_roots: Vec::new(),
             model_id: crate::model::DEFAULT_MODEL_ID.into(),
             reformat: "auto".into(),
+            reformat_device: "auto".into(),
         }
     }
 }

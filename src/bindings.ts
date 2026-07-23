@@ -5,6 +5,7 @@ import { invoke, Channel } from "@tauri-apps/api/core";
 export type Theme = "BONE" | "LEDGER" | "GLACIER" | "LILAC" | "OBSIDIAN";
 export type HotkeyMode = "hold" | "toggle" | "both";
 export type ReformatMode = "auto" | "on" | "off";
+export type ReformatDevice = "auto" | "gpu" | "cpu";
 export type ModelKind = "asr" | "llm";
 export type Retention = "keepNothing" | "hours24" | "days7" | "days30" | "forever";
 export type InjectBackend = "clipboard" | "sendInputUnicode";
@@ -36,6 +37,9 @@ export interface Config {
   modelId: string;
   /** LLM reformatter mode ("auto" GPU-gated | "on" | "off"). Default "auto". */
   reformat: ReformatMode;
+  /** Reformat compute device ("auto" follows the GPU gate | "gpu" | "cpu").
+   *  Only meaningful on a Vulkan build; a CPU build always runs on CPU. Default "auto". */
+  reformatDevice: ReformatDevice;
 }
 
 export interface LevelBar { amp: number; clip: boolean }

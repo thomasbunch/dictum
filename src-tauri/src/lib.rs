@@ -69,6 +69,17 @@ pub struct AppState {
 
 /// The concrete `Effects` the coordinator calls out through. Keeps coordinator.rs
 /// free of Tauri/Win32 calls (it can be unit-tested against a mock Effects).
+/// Resolve the reformat device setting to a use-GPU bool. "auto" follows the GPU
+/// soft-gate (offer_gpu_3b); "gpu"/"cpu" force it. reformat.rs still ANDs this
+/// with the vulkan feature, so a CPU build never offloads regardless.
+fn resolve_reformat_use_gpu(device: &str, offer_gpu_3b: bool) -> bool {
+    match device {
+        "gpu" => true,
+        "cpu" => false,
+        _ => offer_gpu_3b,
+    }
+}
+
 struct RealEffects {
     app: AppHandle,
     hud: HudBroadcaster,
@@ -80,6 +91,8 @@ struct RealEffects {
     reformat: reformat::ReformatEngine,
     /// The GPU-gated reformat SKU this session uses (path + presence check).
     reformat_spec: &'static model::ModelSpec,
+    /// Capable-dGPU signal from the startup probe; resolves reformat_device="auto".
+    reformat_offer_gpu: bool,
     history: Arc<Mutex<history::History>>,
     config: Arc<Mutex<Config>>,
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
@@ -249,6 +262,10 @@ impl Effects for RealEffects {
     fn reformat_model_present(&mut self) -> bool {
         model::files_present(self.reformat_spec)
     }
+    fn set_reformat_device(&mut self, device: String) {
+        self.reformat
+            .set_use_gpu(resolve_reformat_use_gpu(&device, self.reformat_offer_gpu));
+    }
     fn announce_reformat_status(&mut self, st: &ModelStatus) {
         let dto = ModelStatusDto::from(st);
         *self.reformat_status.lock().unwrap() = dto.clone();
@@ -331,10 +348,13 @@ pub fn run() {
             let offer_3b =
                 gpu_info.offer_gpu_3b && (cfg!(feature = "vulkan") || init_cfg.reformat == "on");
             let reformat_spec = model::reformat_spec(model::reformat_id_for_gpu(offer_3b));
-            // Offload the reformat model to the GPU only on a capable dGPU (the
-            // same soft-gate signal that picks the 3B SKU); reformat.rs also
-            // requires the vulkan feature, so CPU/iGPU machines stay on CPU.
-            let reformat = reformat::ReformatEngine::new(tx.clone(), gpu_info.offer_gpu_3b);
+            // Initial offload follows the reformat_device setting ("auto" = the
+            // soft-gate signal that picks the 3B SKU); reformat.rs also requires
+            // the vulkan feature, so CPU/iGPU machines stay on CPU. The user can
+            // flip device at runtime via config (fx.set_reformat_device).
+            let init_use_gpu =
+                resolve_reformat_use_gpu(&init_cfg.reformat_device, gpu_info.offer_gpu_3b);
+            let reformat = reformat::ReformatEngine::new(tx.clone(), init_use_gpu);
             // The worker is pointed at the SKU below via fx.set_reformat_model once
             // fx exists — startup and config-swap share the same Effects seam.
             // Offline sideload: install a hand-dropped reformat .gguf if present.
@@ -431,6 +451,7 @@ pub fn run() {
                 asr,
                 reformat,
                 reformat_spec,
+                reformat_offer_gpu: gpu_info.offer_gpu_3b,
                 history,
                 config,
                 hotkey: hotkey.clone(),

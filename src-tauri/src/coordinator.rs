@@ -85,6 +85,9 @@ pub trait Effects {
     fn unload_reformat_model(&mut self) {}
     /// Repoint the reformat worker at a different SKU.
     fn set_reformat_model(&mut self, _id: String) {}
+    /// Switch the reformat compute device (config reformat_device: auto/gpu/cpu).
+    /// Reloads the model on next use if the device changed.
+    fn set_reformat_device(&mut self, _device: String) {}
     /// Is the GPU-gated reformat SKU present on disk? Cheap (no hashing). Gates
     /// whether a take attempts a reformat at all.
     fn reformat_model_present(&mut self) -> bool {
@@ -666,6 +669,11 @@ impl Coordinator {
                 } else if reformat_was_on && !reformat_now_on {
                     fx.unload_reformat_model();
                 }
+                // Compute-device change (auto/gpu/cpu) — the worker drops+reloads
+                // the model on next use so n_gpu_layers takes effect.
+                if c.reformat_device != self.cfg.reformat_device {
+                    fx.set_reformat_device(c.reformat_device.clone());
+                }
                 self.cfg = c;
             }
             (_, SystemResumed) => {
@@ -841,6 +849,7 @@ mod tests {
         Reformat { gen: u64, det: String },
         EnsureReformatModel,
         UnloadReformatModel,
+        SetReformatDevice(String),
     }
 
     struct Mock {
@@ -982,6 +991,9 @@ mod tests {
         }
         fn unload_reformat_model(&mut self) {
             self.calls.push(Call::UnloadReformatModel);
+        }
+        fn set_reformat_device(&mut self, device: String) {
+            self.calls.push(Call::SetReformatDevice(device));
         }
         fn reformat_model_present(&mut self) -> bool {
             self.reformat_present
@@ -1721,5 +1733,21 @@ mod tests {
         c.handle(CoordMsg::ConfigChanged(off), &mut fx);
         assert!(fx.has(&Call::UnloadReformatModel));
         assert!(!fx.has(&Call::EnsureReformatModel));
+    }
+
+    #[test]
+    fn config_device_change_routes_to_engine() {
+        let mut fx = Mock::new(Instant::now());
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold)); // reformat_device "auto"
+        let to_cpu = Config { reformat_device: "cpu".into(), ..cfg(HotkeyMode::Hold) };
+
+        // auto -> cpu: route the new device to the engine.
+        c.handle(CoordMsg::ConfigChanged(to_cpu.clone()), &mut fx);
+        assert!(fx.has(&Call::SetReformatDevice("cpu".into())));
+
+        // cpu -> cpu (unchanged): no spurious device call.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(to_cpu), &mut fx);
+        assert!(!fx.has(&Call::SetReformatDevice("cpu".into())));
     }
 }

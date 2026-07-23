@@ -20,8 +20,10 @@ The flagship release: a fully local AI reformatter plus a deterministic trio.
   matching that cannot false-trigger inside prose.
 - **Voice snippets**: multi-line replacement values; `{cursor}` placeholder
   reserved (stripped, caret positioning lands with a paste-complete signal).
-- **SETUP → REFORMATTER** section (AUTO/ON/OFF, GPU-gate readout, model cards
-  with live status) and a REFORMATTING HUD state.
+- **SETUP → REFORMATTER** section (AUTO/ON/OFF mode, an AUTO/GPU/CPU **compute
+  device** selector, GPU-gate readout, model cards with live status) and a
+  REFORMATTING HUD state. The device choice lets you keep the reformatter on the
+  GPU when plugged in and force CPU on battery, all in the one installed build.
 - Fine-tune pipeline in `finetune/`: dataset v2 (1,096/188), train/export/eval
   scripts, full release evidence in EVAL.md.
 

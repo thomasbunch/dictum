@@ -288,6 +288,12 @@ const REFORMAT_MODES: [string, string, string][] = [
   ["off", "OFF", "NEVER REWRITE. DETERMINISTIC ONLY."],
 ];
 
+const REFORMAT_DEVICES: [string, string, string][] = [
+  ["auto", "AUTO", "MATCH THE GPU GATE."],
+  ["gpu", "GPU", "ALWAYS OFFLOAD (VULKAN BUILD)."],
+  ["cpu", "CPU", "ALWAYS RUN ON CPU."],
+];
+
 function buildReformatSection(ctx: Ctx): HTMLElement {
   // Mode: AUTO / ON / OFF — same radio grammar as the hotkey mode.
   const radios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter mode" });
@@ -300,6 +306,27 @@ function buildReformatSection(ctx: Ctx): HTMLElement {
       ctx.persistNow();
     });
     radios.append(
+      h("label", { class: "radio" }, [
+        input,
+        h("span", { class: "box" }),
+        h("span", { class: "label" }, label),
+        h("span", { class: "value-sm desc" }, desc),
+      ]),
+    );
+  }
+
+  // Device: AUTO / GPU / CPU — where the reformatter runs. GPU is faster; CPU
+  // spares the GPU (e.g. on battery). Only bites on a Vulkan build.
+  const deviceRadios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter device" });
+  for (const [val, label, desc] of REFORMAT_DEVICES) {
+    const input = h("input", { type: "radio", name: "reformat-device", value: val });
+    input.checked = ctx.config.reformatDevice === val;
+    input.addEventListener("change", () => {
+      if (!input.checked) return;
+      ctx.config.reformatDevice = val as typeof ctx.config.reformatDevice;
+      ctx.persistNow();
+    });
+    deviceRadios.append(
       h("label", { class: "radio" }, [
         input,
         h("span", { class: "box" }),
@@ -376,6 +403,8 @@ function buildReformatSection(ctx: Ctx): HTMLElement {
   const body = h("div", {}, [
     radios,
     h("div", { class: "value-sm sect-note" }, gpuLine),
+    h("div", { class: "value-sm sect-note" }, "COMPUTE — GPU IS FASTER; CPU SPARES THE GPU ON BATTERY."),
+    deviceRadios,
     cards,
   ]);
   return sect("REFORMATTER", "A LOCAL LLM REWRITE OF THE ASR TEXT. RAW STAYS ON THE TAPE.", body);
