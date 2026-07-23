@@ -2,7 +2,9 @@
    masthead, view, footer. Radius 0, no shadows, hairlines inside, strong ink
    rules on masthead + footer. */
 
-html, body, #app { height: 100%; }
+/* The card fills the window and .view is the only scroller — the document must
+   never scroll, or sub-pixel rounding at HiDPI prints a second scrollbar. */
+html, body, #app { height: 100%; overflow: hidden; }
 body { background: var(--field); border: 1px solid var(--line); }
 
 #app { display: flex; flex-direction: column; }

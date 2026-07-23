@@ -129,8 +129,11 @@ button, select { font: inherit; color: inherit; }
 .toggle input:checked ~ .track .knob { left: auto; right: 2px; background: var(--ink); }
 .toggle input:focus-visible ~ .track { outline: 2px solid var(--ink); outline-offset: 2px; }
 
-/* Radio: 10x10 square, filled ink when selected (§4). */
-.radio { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; }
+/* Radio: 10x10 square, filled ink when selected (§4). Positioned like .toggle
+   so the absolute input's containing block is the label — without it the input
+   resolves to the ICB, escapes .view's clipping and grows the document,
+   printing a second scrollbar beside the view's. */
+.radio { display: inline-flex; align-items: center; gap: 10px; cursor: pointer; position: relative; }
 .radio input { position: absolute; opacity: 0; width: 10px; height: 10px; margin: 0; cursor: pointer; }
 .radio .box { width: 10px; height: 10px; border: 1px solid var(--ink); background: transparent; flex: none; }
 .radio input:checked + .box { background: var(--ink); }
