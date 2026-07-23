@@ -93,7 +93,48 @@ body { background: var(--field); border: 1px solid var(--line); }
 .dl-bar.striped .fill { display: none; }
 
 /* ---- View container ------------------------------------------------------ */
-.view { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+/* scroll, not auto: the channel below is a permanent margin, so switching
+   views never reflows the content column by its width. */
+.view { flex: 1 1 0; min-height: 0; overflow-y: scroll; display: flex; flex-direction: column; }
+/* Chromium 127+ makes a childless scroller a tab stop; +2px offset would be
+   clipped by #app's overflow. Same inward ring as .trow. */
+.view:focus-visible { outline-offset: -2px; }
+
+/* ---- Scroll channel (§3) — the sprocket margin, mirrored ------------------
+   24px of bare --field walled by one 1px --hair rule: the sprocket's own edge
+   rule (line ~117), mirrored to the right of the tape, so every section
+   hairline terminates on a ruled margin instead of on a raw Chromium bar. No
+   dots — the dot tile means "the tape's feed edge" and belongs to one margin.
+   The carriage is --paper capped 1px --ink top and bottom (the keycap recipe
+   cut to two edges); its --hair left border keeps the wall unbroken as it
+   travels. Never add scrollbar-width/scrollbar-color anywhere in this window:
+   Chromium 121+ lets the standard properties win and silently reverts all of
+   this to the OS bar. Radius is restated because * (tokens.css:50) cannot
+   reach pseudo-elements (§10 r9). */
+.view::-webkit-scrollbar { width: 24px; height: 24px; }
+.view::-webkit-scrollbar-button { display: none; }
+.view::-webkit-scrollbar-track { background: var(--field); border-radius: 0; }
+.view::-webkit-scrollbar-track:vertical { border-left: 1px solid var(--hair); }
+.view::-webkit-scrollbar-track:horizontal { border-top: 1px solid var(--hair); }
+.view::-webkit-scrollbar-corner {
+  background: var(--field);
+  border-left: 1px solid var(--hair); border-top: 1px solid var(--hair);
+}
+.view::-webkit-scrollbar-thumb { background: var(--paper); border-radius: 0; }
+.view::-webkit-scrollbar-thumb:vertical {
+  min-height: 40px;
+  border-left: 1px solid var(--hair); /* the wall runs through the carriage */
+  border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink);
+}
+.view::-webkit-scrollbar-thumb:horizontal {
+  min-width: 40px;
+  border-top: 1px solid var(--hair);
+  border-left: 1px solid var(--ink); border-right: 1px solid var(--ink);
+}
+/* §4 hover fill. :active holds it so the carriage doesn't flick back to
+   --paper when the pointer strays mid-drag. Colour only — nothing reflows. */
+.view::-webkit-scrollbar-thumb:hover,
+.view::-webkit-scrollbar-thumb:active { background: var(--register); }
 
 /* ---- TAPE (§5.2) --------------------------------------------------------- */
 .toolbar {
