@@ -331,7 +331,10 @@ pub fn run() {
             let offer_3b =
                 gpu_info.offer_gpu_3b && (cfg!(feature = "vulkan") || init_cfg.reformat == "on");
             let reformat_spec = model::reformat_spec(model::reformat_id_for_gpu(offer_3b));
-            let reformat = reformat::ReformatEngine::new(tx.clone());
+            // Offload the reformat model to the GPU only on a capable dGPU (the
+            // same soft-gate signal that picks the 3B SKU); reformat.rs also
+            // requires the vulkan feature, so CPU/iGPU machines stay on CPU.
+            let reformat = reformat::ReformatEngine::new(tx.clone(), gpu_info.offer_gpu_3b);
             // The worker is pointed at the SKU below via fx.set_reformat_model once
             // fx exists — startup and config-swap share the same Effects seam.
             // Offline sideload: install a hand-dropped reformat .gguf if present.

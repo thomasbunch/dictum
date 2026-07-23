@@ -33,8 +33,11 @@ The flagship release: a fully local AI reformatter plus a deterministic trio.
 - First-run masthead now keys off the active model, not the first registry entry.
 
 ### Notes
-- CPU-only builds auto-select the 1.5B SKU; the 3B auto-pick activates with the
-  Vulkan build (explicit ON overrides).
+- The installer is a **Vulkan (GPU-accelerated)** build. On a capable discrete
+  GPU (≥4 GB VRAM) AUTO offloads the 3B reformatter to the GPU (reformat <1s);
+  CPU/iGPU machines automatically stay on CPU with the 1.5B SKU via a runtime GPU
+  gate (no offload where it wouldn't help), so one installer is safe everywhere.
+  Explicit ON overrides.
 - Per-app auto-profiles moved to 0.3.x.
 
 ## 0.2.0 — 2026-06

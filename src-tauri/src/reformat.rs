@@ -45,9 +45,9 @@ pub struct ReformatEngine {
 }
 
 impl ReformatEngine {
-    pub fn new(coord_tx: Sender<CoordMsg>) -> Self {
+    pub fn new(coord_tx: Sender<CoordMsg>, use_gpu: bool) -> Self {
         let (tx, rx) = channel();
-        thread::spawn(move || run(rx, coord_tx));
+        thread::spawn(move || run(rx, coord_tx, use_gpu));
         ReformatEngine { tx }
     }
 
@@ -72,8 +72,8 @@ impl ReformatEngine {
     }
 }
 
-fn run(rx: Receiver<ReformatCmd>, tx: Sender<CoordMsg>) {
-    let mut state = State::new();
+fn run(rx: Receiver<ReformatCmd>, tx: Sender<CoordMsg>, use_gpu: bool) {
+    let mut state = State::new(use_gpu);
     // Loop ends when the handle is dropped (channel closed) -> model freed.
     while let Ok(cmd) = rx.recv() {
         match cmd {
@@ -137,12 +137,14 @@ struct State {
     backend: Option<LlamaBackend>,
     model: Option<LlamaModel>,
     model_path: Option<PathBuf>,
+    /// Capable dGPU present (soft gate). Offload only when true AND vulkan-built.
+    use_gpu: bool,
 }
 
 #[cfg(feature = "reformat-llm")]
 impl State {
-    fn new() -> Self {
-        State { backend: None, model: None, model_path: None }
+    fn new(use_gpu: bool) -> Self {
+        State { backend: None, model: None, model_path: None, use_gpu }
     }
 
     fn is_loaded(&self) -> bool {
@@ -186,8 +188,10 @@ impl State {
             }
         }
         status(ModelStatus::Loading { pct: 50 });
-        // 999 = offload everything to GPU on a vulkan build; 0 = pure CPU.
-        let n_gpu_layers: u32 = if cfg!(feature = "vulkan") { 999 } else { 0 };
+        // Offload everything only on a vulkan build AND a capable GPU (soft gate:
+        // >=4GB dGPU). CPU/iGPU machines stay at 0 layers even in a vulkan build,
+        // so one installer is safe everywhere. // ponytail: 999 = "all layers".
+        let n_gpu_layers: u32 = if cfg!(feature = "vulkan") && self.use_gpu { 999 } else { 0 };
         let params = LlamaModelParams::default().with_n_gpu_layers(n_gpu_layers);
         match LlamaModel::load_from_file(self.backend.as_ref().unwrap(), &path, &params) {
             Ok(m) => {
@@ -295,7 +299,7 @@ struct State;
 
 #[cfg(not(feature = "reformat-llm"))]
 impl State {
-    fn new() -> Self {
+    fn new(_use_gpu: bool) -> Self {
         State
     }
     fn is_loaded(&self) -> bool {
@@ -357,7 +361,7 @@ mod tests {
     #[ignore]
     fn reformats_a_fixture() {
         let (tx, rx) = channel();
-        let mut state = State::new();
+        let mut state = State::new(true);
         state.set_model(PathBuf::from(
             r"C:\Users\honorr\Documents\DEV\Dictum\finetune\out\dictum-reformat-1.5b-Q4_K_M.gguf",
         ));
