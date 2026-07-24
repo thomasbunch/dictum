@@ -411,6 +411,70 @@ function buildReformatSection(ctx: Ctx): HTMLElement {
 }
 
 // ---------------------------------------------------------------------------
+// LIVE PREVIEW — companion streaming model that paints partials into the HUD as
+// you speak. Never changes the printed text (Parakeet stays authoritative).
+// ---------------------------------------------------------------------------
+function buildLivePreviewSection(ctx: Ctx): HTMLElement {
+  const toggle = toggleRow(
+    "STREAM A LIVE PREVIEW",
+    "SHOWS WORDS IN THE HUD AS YOU SPEAK. NEVER CHANGES THE PRINTED TEXT.",
+    ctx.config.streamingPreview,
+    false,
+    (on) => {
+      ctx.config.streamingPreview = on;
+      ctx.persistNow();
+    },
+  );
+
+  // Single companion SKU (kind === "stream"); never selectable as the recognizer.
+  const cards = h("div", { class: "model-cards", role: "list", "aria-label": "Live preview model" });
+  function update() {
+    cards.innerHTML = "";
+    for (const m of ctx.models.filter((m) => m.kind === "stream")) {
+      const stat = h("span", { class: "stat" });
+      const dlSlot = h("div");
+      const card = h("div", { class: "model-card", role: "listitem" }, [
+        h("div", { class: "head" }, [h("span", { class: "name" }, m.display), stat]),
+        h("div", { class: "value-sm line2" }, `${m.sizeMb} MB · ${m.langs} · SHERPA-ONNX · CPU`),
+        dlSlot,
+      ]);
+
+      if (m.present) {
+        // STANDBY (not an error): present on disk, recognizer lazy-loads on the
+        // first preview session — same grammar as the reformat card.
+        switch (ctx.streamStatus.k) {
+          case "ready": stat.textContent = "● LOADED"; break;
+          case "unloaded": stat.textContent = "○ STANDBY"; break;
+          case "loading": stat.textContent = `WARMING UP · ${ctx.streamStatus.pct}%`; break;
+          case "error": stat.textContent = "PREVIEW ERROR"; break;
+          case "missing": stat.textContent = "NOT ON THIS MACHINE"; break;
+        }
+      } else {
+        stat.textContent = "NOT ON THIS MACHINE";
+        const slot = h("div", { class: "dl" });
+        slot.append(
+          h("button", {
+            class: "btn",
+            onclick: () =>
+              runDownloadFlow(m.id, slot, m.sizeMb, () => {
+                void api.modelInfo().then((info) => { ctx.models = info; update(); });
+                void api.getStreamStatus().then((s) => { ctx.streamStatus = s; update(); });
+              }),
+          }, `FETCH THE MODEL · ${m.sizeMb} MB`),
+        );
+        dlSlot.append(slot);
+      }
+      cards.append(card);
+    }
+  }
+  update();
+  ctx.streamCardUpdate = update;
+
+  const body = h("div", {}, [toggle, cards]);
+  return sect("LIVE PREVIEW", "OPTIONAL. THE PRINTED TEXT ALWAYS COMES FROM THE MAIN MODEL.", body);
+}
+
+// ---------------------------------------------------------------------------
 // TAPE & PRIVACY (§5.4.4)
 // ---------------------------------------------------------------------------
 const RETENTIONS: Retention[] = ["keepNothing", "hours24", "days7", "days30", "forever"];
@@ -624,7 +688,31 @@ function buildProjectsSection(ctx: Ctx): HTMLElement {
     },
   }, "ADD FOLDER");
 
-  const body = h("div", {}, [table, addLink]);
+  // Cue word that arms repo-symbol correction (repo-vocab). Blank = off, same
+  // blur/Enter-commit discipline as the folder input above.
+  const cueInput = h("input", {
+    class: "field-input mono",
+    type: "text",
+    placeholder: "symbol",
+    "aria-label": "Symbol cue word",
+    value: ctx.config.symbolCue,
+  });
+  const commitCue = () => {
+    const v = cueInput.value.trim();
+    if (v === ctx.config.symbolCue) return;
+    ctx.config.symbolCue = v;
+    ctx.persistNow();
+  };
+  cueInput.addEventListener("blur", commitCue);
+  cueInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") cueInput.blur();
+  });
+  const cueRow = h("div", { class: "cue-row" }, [
+    h("span", { class: "value-sm note" }, "CORRECT A SPOKEN SYMBOL AFTER THIS CUE WORD (BLANK = OFF)."),
+    cueInput,
+  ]);
+
+  const body = h("div", {}, [table, addLink, cueRow]);
   return sect("PROJECTS", "SPOKEN FILE NAMES PRINT AS @PATH TAGS.", body);
 }
 
@@ -679,6 +767,7 @@ export function renderSetup(ctx: Ctx, host: HTMLElement): void {
     buildInputSection(ctx),
     buildModelSection(ctx),
     buildReformatSection(ctx),
+    buildLivePreviewSection(ctx),
     buildPrivacySection(ctx),
     buildInjectionSection(ctx),
     buildProjectsSection(ctx),

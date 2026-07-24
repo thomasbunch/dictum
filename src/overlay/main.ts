@@ -27,6 +27,7 @@ let fillEl: HTMLElement;
 let msgEl: HTMLElement;
 let rightEl: HTMLElement;
 let hintEl: HTMLElement;
+let partialEl: HTMLElement; // second-row live transcript (streaming preview)
 let ctx: CanvasRenderingContext2D;
 
 let palette = { ink: "#211F1A", dots: "#D0CCC0", oxide: "#C23B2B" };
@@ -168,6 +169,10 @@ function onState(next: HudState) {
 
   listening = next.k === "listening" || next.k === "confirm_discard";
 
+  // Any non-listening state (PRINTING…/PRINTED/KILLED/error, and a fresh
+  // listening reset) clears the streaming partial from the second row.
+  if (!listening) { partialEl.hidden = true; partialEl.textContent = ""; }
+
   switch (next.k) {
     case "hidden":
       break;
@@ -232,13 +237,27 @@ function onState(next: HudState) {
 
 function onHudEvent(e: HudEvent) {
   if (e.t === "levels") onLevels(e.bars);
+  else if (e.t === "partial") onPartial(e.text);
   else onState(e.s);
+}
+
+/** Live streaming transcript (second row). Shows only the visible tail so the
+ * newest words are never clipped; natural case (the model's own output). */
+function onPartial(text: string) {
+  if (!listening) return; // only during a live take
+  const shown = text.length > 56 ? "…" + text.slice(-56) : text;
+  partialEl.textContent = shown;
+  partialEl.hidden = shown.length === 0;
 }
 
 // --- theme -----------------------------------------------------------------
 
-function applyTheme(theme: string) {
-  document.documentElement.className = `theme-${theme.toLowerCase()}`;
+// Theme AND the streaming-preview class in ONE className write. main.ts:240 used
+// to assign `className` outright, which would silently wipe a classList.add —
+// so the preview class rides along here, set together from config.
+function applyConfig(c: Config) {
+  document.documentElement.className =
+    `theme-${c.theme.toLowerCase()}${c.streamingPreview ? " preview" : ""}`;
   readPalette();
   if (!rafRunning) render(performance.now()); // repaint the static frame
 }
@@ -259,7 +278,8 @@ function init() {
         <div class="right hud-timer"></div>
         <div class="hint value-xs" hidden></div>
       </div>
-    </div>`;
+    </div>
+    <div class="partial" hidden></div>`;
   contentEl = host.querySelector(".content")!;
   stateEl = host.querySelector(".state")!;
   laneEl = host.querySelector(".lane")!;
@@ -268,12 +288,13 @@ function init() {
   msgEl = host.querySelector(".msg")!;
   rightEl = host.querySelector(".right")!;
   hintEl = host.querySelector(".hint")!;
+  partialEl = host.querySelector(".partial")!;
   ctx = laneEl.getContext("2d")!;
   setupCanvas();
   readPalette();
 
-  api.getConfig().then((c: Config) => applyTheme(c.theme));
-  listen<Config>("config://changed", (e) => applyTheme(e.payload.theme));
+  api.getConfig().then((c: Config) => applyConfig(c));
+  listen<Config>("config://changed", (e) => applyConfig(e.payload));
   // Retry until the backend accepts the subscription: the webview can finish
   // loading before .setup() has managed AppState, and a HUD that never
   // subscribes is invisible forever (observed). Errors surface in the window

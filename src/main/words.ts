@@ -1,11 +1,11 @@
-// WORDS view (§5.3) — two ledgers: vocabulary (biases the ear) and
+// WORDS view (§5.3) — two ledgers: vocabulary (canonical casing) and
 // replacements (typeset rules), plus the filler strike strip.
-import { api } from "../bindings";
+import { api, type Replacement } from "../bindings";
 import { h } from "../shared";
 import type { Ctx } from "./main";
+import { CODE_SYMBOLS, CODING_TERMS, addPack } from "./packs";
 
 const VOCAB_MAX = 50;
-const VOCAB_SOFT = 30;
 
 function buildToggle(checked: boolean, disabled: boolean, onChange: (on: boolean) => void): HTMLElement {
   const input = h("input", { type: "checkbox" });
@@ -24,7 +24,7 @@ function buildVocabulary(ctx: Ctx): HTMLElement {
   const counter = h("span", { class: "value-sm counter" });
   col.append(
     h("div", { class: "col-head" }, [h("span", { class: "label" }, "VOCABULARY"), counter]),
-    h("div", { class: "value-sm col-note" }, "PROPER NOUNS AND JARGON — BIASES THE EAR."),
+    h("div", { class: "value-sm col-note" }, "PROPER NOUNS AND JARGON — FIXES THEIR CASING."),
   );
 
   const input = h("input", { class: "field-input", type: "text", placeholder: "ADD A TERM…", "aria-label": "Add a vocabulary term" });
@@ -34,7 +34,6 @@ function buildVocabulary(ctx: Ctx): HTMLElement {
   function updateCounter() {
     const n = ctx.config.vocabulary.length;
     counter.textContent = n >= VOCAB_MAX ? `${n} / ${VOCAB_MAX} — FULL` : `${n} / ${VOCAB_MAX}`;
-    counter.classList.toggle("heavy", n > VOCAB_SOFT); // >30: ink, weight 600 — never oxide
     const full = n >= VOCAB_MAX;
     input.disabled = full;
     addBtn.disabled = full;
@@ -75,7 +74,7 @@ function buildVocabulary(ctx: Ctx): HTMLElement {
   col.append(
     h("div", { class: "vocab-add" }, [input, addBtn]),
     chips,
-    h("div", { class: "value-sm vocab-warn" }, "A LONG LIST DULLS THE EAR — KEEP IT UNDER 30."),
+    h("div", { class: "value-sm vocab-warn" }, "CASING ONLY. FOR SPELLING OR EXPANSION, ADD A RULE."),
   );
   renderChips();
   return col;
@@ -103,7 +102,9 @@ function buildReplacements(ctx: Ctx): HTMLElement {
     const r = ctx.config.replacements[i];
     const heard = h("input", { type: "text", value: r.heard, "aria-label": "Heard" });
     heard.addEventListener("input", () => { r.heard = heard.value; ctx.persist(); });
-    const printed = h("input", { type: "text", value: r.printed, "aria-label": "Printed" });
+    // Printed is a textarea so snippets can be multi-line. h() sets value via a
+    // child text node (setAttribute("value") no-ops on textarea); .value reads back.
+    const printed = h("textarea", { rows: 1, "aria-label": "Printed" }, r.printed);
     printed.addEventListener("input", () => { r.printed = printed.value; ctx.persist(); });
     const x = h("button", {
       class: "x",
@@ -120,7 +121,7 @@ function buildReplacements(ctx: Ctx): HTMLElement {
   /** Ghost add row (§5.3): typing into it makes it real. */
   function buildGhostRow(): HTMLElement {
     const heard = h("input", { type: "text", placeholder: "HEARD…", "aria-label": "New rule heard" });
-    const printed = h("input", { type: "text", placeholder: "PRINTED…", "aria-label": "New rule printed" });
+    const printed = h("textarea", { rows: 1, placeholder: "PRINTED…", "aria-label": "New rule printed" });
     ghostHeard = heard;
     const commit = () => {
       if (!heard.value.trim() && !printed.value.trim()) return;
@@ -128,8 +129,10 @@ function buildReplacements(ctx: Ctx): HTMLElement {
       renderTable();
       ctx.persistNow();
       // Focus the new row's heard input so typing continues uninterrupted.
+      // `.repl-row input` now matches only heard inputs (printed is a textarea),
+      // so the new row's heard is the second-to-last input (last is the ghost's).
       const rows = table.querySelectorAll<HTMLInputElement>(".repl-row input");
-      rows[rows.length - 4]?.focus();
+      rows[rows.length - 2]?.focus();
     };
     heard.addEventListener("change", commit);
     printed.addEventListener("change", commit);
@@ -173,6 +176,16 @@ function buildReplacements(ctx: Ctx): HTMLElement {
   const exportAs = (format: "txt" | "json") =>
     void api.exportReplacements(format).then((c) => download(`replacements.${format}`, c));
 
+  // Preset packs: opt-in, merged client-side (addPack dedupes by heard so a
+  // re-click is a no-op and never wipes user rules — unlike importReplacements).
+  const packNote = h("span", { class: "value-sm fmt" });
+  const addAndRender = (pack: Replacement[], name: string) => {
+    const n = addPack(ctx.config.replacements, pack);
+    renderTable();
+    ctx.persistNow();
+    packNote.textContent = n ? `+${n}` : `${name} ALL PRESENT`;
+  };
+
   col.append(
     table,
     h("div", { class: "repl-links" }, [
@@ -186,6 +199,12 @@ function buildReplacements(ctx: Ctx): HTMLElement {
           h("button", { class: "action", onclick: () => exportAs("json") }, "JSON"),
         ]),
       ]),
+    ]),
+    h("div", { class: "repl-links" }, [
+      h("span", { class: "microlabel" }, "PACKS"),
+      h("button", { class: "action", onclick: () => addAndRender(CODE_SYMBOLS, "SYMBOLS") }, "CODE SYMBOLS"),
+      h("button", { class: "action", onclick: () => addAndRender(CODING_TERMS, "TERMS") }, "CODING TERMS"),
+      packNote,
     ]),
     fileInput,
   );

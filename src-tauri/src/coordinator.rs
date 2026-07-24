@@ -96,6 +96,27 @@ pub trait Effects {
     /// Reformat model status changed — surface to the main window (own event,
     /// parallel to `announce_model_status`).
     fn announce_reformat_status(&mut self, _st: &ModelStatus) {}
+
+    // --- Streaming live preview (all default no-op / false so the test Mock
+    //     stays lean; only RealEffects drives the stream worker + audio tee) ---
+    /// Feed live frames to the preview decoder; a partial replies as
+    /// `CoordMsg::PartialText` tagged with `generation` (same staleness guard).
+    fn stream_feed(&mut self, _generation: u64, _samples: Vec<f32>) {}
+    /// Warm-load the preview model at session start (silent-off on failure).
+    fn ensure_stream_model(&mut self) {}
+    /// Drop the preview model to free RAM (idle-unload).
+    fn unload_stream_model(&mut self) {}
+    /// Is the preview SKU present on disk? Cheap (no hashing). Gates whether a
+    /// session tees frames at all (computed once per session).
+    fn stream_model_present(&mut self) -> bool {
+        false
+    }
+    /// Tell the audio worker whether to tee frames AND size the overlay window
+    /// (config toggle: on -> 400x76 + tee armed, off -> 400x52 + tee off).
+    fn set_stream_preview(&mut self, _on: bool) {}
+    /// Preview model status changed — surface to the main window (own event,
+    /// parallel to `announce_reformat_status`).
+    fn announce_stream_status(&mut self, _st: &ModelStatus) {}
     fn now(&mut self) -> Instant;
 }
 
@@ -136,6 +157,13 @@ pub struct Coordinator {
     /// and surfaced to the frontend. Not used to gate reformat (presence-on-disk
     /// via `fx.reformat_model_present()` does that).
     reformat_status: ModelStatus,
+    /// Streaming preview model lifecycle, surfaced to the frontend (own event,
+    /// parallel to `reformat_status`).
+    stream_status: ModelStatus,
+    /// Streaming preview armed for this session: `cfg.streaming_preview` AND the
+    /// SKU is present on disk. Computed once at session start so presence isn't
+    /// re-checked per frame; gates both the tee-feed and the partial forward.
+    preview_this_session: bool,
     /// (raw, det) held while an async reformat is in flight. `raw` -> history,
     /// `det` -> the guardrail input and the fallback text. Cleared on session reset.
     pending: Option<(String, String)>,
@@ -163,6 +191,8 @@ impl Coordinator {
             gen: 0,
             model_status: ModelStatus::Ready, // assume shell sends real status before first use
             reformat_status: ModelStatus::Missing, // real status arrives on first ensure/reformat
+            stream_status: ModelStatus::Missing, // real status arrives on first ensure
+            preview_this_session: false,
             pending: None,
             texts: Vec::new(),
             outstanding: 0,
@@ -209,6 +239,7 @@ impl Coordinator {
         self.level_amps.clear();
         self.take_clipped = false;
         self.pending = None;
+        self.preview_this_session = false;
     }
 
     /// Reformat is enabled by config (mode != "off"). Whether it actually runs
@@ -265,6 +296,14 @@ impl Coordinator {
         if !self.model_ready() {
             let pct = self.loading_pct();
             self.set_state(fx, HudState::LoadingModel { pct });
+        }
+
+        // Streaming live preview: opt-in AND the SKU present on disk. Computed
+        // once here (not per frame). Warm the preview decoder up front so the
+        // first partials land early; failure/absence degrades silently.
+        self.preview_this_session = self.cfg.streaming_preview && fx.stream_model_present();
+        if self.preview_this_session {
+            fx.ensure_stream_model();
         }
     }
 
@@ -645,6 +684,30 @@ impl Coordinator {
                 fx.announce_reformat_status(&self.reformat_status);
             }
 
+            // ---- Streaming live preview (HUD-only; never injected text) -------
+            (State::Recording { .. }, StreamFrames(samples)) => {
+                if self.preview_this_session {
+                    fx.stream_feed(self.gen, samples);
+                }
+            }
+            // Frames that arrive outside Recording (e.g. the finalize-pass tail)
+            // are dropped — the preview only paints during a live take.
+            (_, StreamFrames(_)) => {}
+            (_, PartialText { generation, text }) => {
+                // Stale (post-cancel / post-release) partials carry a mismatched
+                // generation and are dropped — identical to DecodeDone staleness.
+                if generation == self.gen
+                    && self.preview_this_session
+                    && matches!(self.state, State::Recording { .. })
+                {
+                    fx.hud(HudEvent::Partial { text });
+                }
+            }
+            (_, StreamModelStatus { status }) => {
+                self.stream_status = status;
+                fx.announce_stream_status(&self.stream_status);
+            }
+
             // ---- Model / config / system -------------------------------------
             (_, ModelStatus(st)) => self.on_model_status(fx, st),
             (_, ConfigChanged(c)) => {
@@ -673,6 +736,17 @@ impl Coordinator {
                 // the model on next use so n_gpu_layers takes effect.
                 if c.reformat_device != self.cfg.reformat_device {
                     fx.set_reformat_device(c.reformat_device.clone());
+                }
+                // Streaming preview toggle: (dis)arm the audio tee + resize the
+                // overlay in lockstep, and warm/drop the preview model (same
+                // ensure-on-enable / unload-on-disable pattern as reformat).
+                if c.streaming_preview != self.cfg.streaming_preview {
+                    fx.set_stream_preview(c.streaming_preview);
+                    if c.streaming_preview && !c.unload_on_idle && fx.stream_model_present() {
+                        fx.ensure_stream_model();
+                    } else if !c.streaming_preview {
+                        fx.unload_stream_model();
+                    }
                 }
                 self.cfg = c;
             }
@@ -756,6 +830,7 @@ impl Coordinator {
                 if self.cfg.unload_on_idle {
                     fx.unload_model();
                     fx.unload_reformat_model();
+                    fx.unload_stream_model();
                 }
             }
             Timer::ReformatTimeout => {
@@ -850,6 +925,10 @@ mod tests {
         EnsureReformatModel,
         UnloadReformatModel,
         SetReformatDevice(String),
+        StreamFeed { gen: u64, len: usize },
+        EnsureStreamModel,
+        UnloadStreamModel,
+        SetStreamPreview(bool),
     }
 
     struct Mock {
@@ -863,6 +942,8 @@ mod tests {
         last_meta: Option<TakeMeta>,
         // Reformat SKU present on disk? Gates whether a take reformats.
         reformat_present: bool,
+        // Preview SKU present on disk? Gates whether a session tees frames.
+        stream_present: bool,
     }
 
     impl Mock {
@@ -875,6 +956,7 @@ mod tests {
                 replaced: None,
                 last_meta: None,
                 reformat_present: false,
+                stream_present: false,
             }
         }
         fn with_clock(base: Instant, offsets_ms: &[u64]) -> Self {
@@ -902,6 +984,7 @@ mod tests {
     fn tag(ev: &HudEvent) -> String {
         match ev {
             HudEvent::Levels { bars } => format!("levels:{}", bars.len()),
+            HudEvent::Partial { text } => format!("partial:{text}"),
             HudEvent::State { s } => match s {
                 HudState::Hidden => "hidden".into(),
                 HudState::LoadingModel { pct } => format!("loading:{pct}"),
@@ -997,6 +1080,21 @@ mod tests {
         }
         fn reformat_model_present(&mut self) -> bool {
             self.reformat_present
+        }
+        fn stream_feed(&mut self, generation: u64, samples: Vec<f32>) {
+            self.calls.push(Call::StreamFeed { gen: generation, len: samples.len() });
+        }
+        fn ensure_stream_model(&mut self) {
+            self.calls.push(Call::EnsureStreamModel);
+        }
+        fn unload_stream_model(&mut self) {
+            self.calls.push(Call::UnloadStreamModel);
+        }
+        fn stream_model_present(&mut self) -> bool {
+            self.stream_present
+        }
+        fn set_stream_preview(&mut self, on: bool) {
+            self.calls.push(Call::SetStreamPreview(on));
         }
         fn now(&mut self) -> Instant {
             let v = self.clock[self.clock_idx.min(self.clock.len() - 1)];
@@ -1749,5 +1847,147 @@ mod tests {
         fx.calls.clear();
         c.handle(CoordMsg::ConfigChanged(to_cpu), &mut fx);
         assert!(!fx.has(&Call::SetReformatDevice("cpu".into())));
+    }
+
+    // --- Streaming live preview ---------------------------------------------
+
+    fn cfg_preview(mode: HotkeyMode) -> Config {
+        Config { streaming_preview: true, ..cfg(mode) }
+    }
+
+    #[test]
+    fn preview_off_no_feed() {
+        let mut fx = Mock::new(Instant::now());
+        fx.stream_present = true; // present on disk, but the toggle is OFF
+        let mut c = Coordinator::new(cfg(HotkeyMode::Both));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        assert!(!fx.has(&Call::EnsureStreamModel)); // toggle off -> not armed
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::StreamFrames(samples(800)), &mut fx);
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::StreamFeed { .. })));
+    }
+
+    #[test]
+    fn preview_on_feeds_with_gen() {
+        let mut fx = Mock::new(Instant::now());
+        fx.stream_present = true;
+        let mut c = Coordinator::new(cfg_preview(HotkeyMode::Both));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        // Preview model warmed exactly once at session start.
+        assert_eq!(fx.calls.iter().filter(|x| matches!(x, Call::EnsureStreamModel)).count(), 1);
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::StreamFrames(samples(800)), &mut fx);
+        // Frames fed to the worker stamped with the session generation.
+        assert!(fx.has(&Call::StreamFeed { gen: g, len: 800 }));
+    }
+
+    #[test]
+    fn partial_forwarded_to_hud() {
+        let mut fx = Mock::new(Instant::now());
+        fx.stream_present = true;
+        let mut c = Coordinator::new(cfg_preview(HotkeyMode::Both));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::PartialText { generation: g, text: "after early".into() }, &mut fx);
+        assert!(fx.huds().contains(&"partial:after early".to_string()));
+    }
+
+    #[test]
+    fn stale_partial_dropped() {
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0, 5]); // <30s elapsed -> Esc kills immediately
+        fx.stream_present = true;
+        let mut c = Coordinator::new(cfg_preview(HotkeyMode::Both));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        c.handle(CoordMsg::Cancel, &mut fx); // bumps generation, back to Idle
+        assert_ne!(c.gen, g);
+        // A partial from the killed take arrives stale -> never painted.
+        c.handle(CoordMsg::PartialText { generation: g, text: "ghost".into() }, &mut fx);
+        assert!(!fx.huds().iter().any(|h| h.starts_with("partial:")));
+    }
+
+    #[test]
+    fn partial_dropped_outside_recording() {
+        let base = Instant::now();
+        let mut fx = Mock::with_clock(base, &[0, 600]);
+        fx.stream_present = true;
+        let mut c = Coordinator::new(cfg_preview(HotkeyMode::Hold));
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        // A segment is still decoding, so release lands us in Decoding (not Idle).
+        c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx);
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(8000)), &mut fx);
+        assert!(matches!(c.state, State::Decoding));
+        // A partial that lands after release (during Decoding) is dropped.
+        c.handle(CoordMsg::PartialText { generation: g, text: "late".into() }, &mut fx);
+        assert!(!fx.huds().iter().any(|h| h.starts_with("partial:")));
+    }
+
+    #[test]
+    fn idle_unload_drops_stream() {
+        let mut fx = Mock::new(Instant::now());
+        let mut c = Coordinator::new(Config {
+            hotkey_mode: HotkeyMode::Hold,
+            unload_on_idle: true,
+            ..Default::default()
+        });
+        take_to_decode(&mut c, &mut fx, "hi there");
+        c.fire_timer(&mut fx); // HideHud -> fade
+        c.fire_timer(&mut fx); // HideWindow -> hide + arm idle-unload
+        c.fire_timer(&mut fx); // UnloadIdle -> all three models unload
+        assert!(fx.has(&Call::UnloadStreamModel));
+    }
+
+    #[test]
+    fn config_toggle_arms_and_disarms_preview() {
+        let mut fx = Mock::new(Instant::now());
+        fx.stream_present = true;
+        let off = cfg(HotkeyMode::Hold); // streaming_preview defaults false
+        let on = cfg_preview(HotkeyMode::Hold);
+        let mut c = Coordinator::new(off.clone());
+
+        // off -> on: arm the tee/overlay AND warm the preview model.
+        c.handle(CoordMsg::ConfigChanged(on), &mut fx);
+        assert!(fx.has(&Call::SetStreamPreview(true)));
+        assert!(fx.has(&Call::EnsureStreamModel));
+
+        // on -> off: disarm and unload.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(off), &mut fx);
+        assert!(fx.has(&Call::SetStreamPreview(false)));
+        assert!(fx.has(&Call::UnloadStreamModel));
+        assert!(!fx.has(&Call::EnsureStreamModel));
+    }
+
+    #[test]
+    fn streaming_partial_never_alters_injected_text() {
+        let mut fx = Mock::new(Instant::now());
+        fx.stream_present = true;
+        let mut c = Coordinator::new(cfg_preview(HotkeyMode::Hold)); // reformat inactive (absent)
+
+        c.handle(CoordMsg::HotkeyDown, &mut fx);
+        let g = c.gen;
+        c.handle(CoordMsg::CaptureStarted, &mut fx);
+        // A mid-hold streaming partial paints the HUD...
+        c.handle(CoordMsg::PartialText { generation: g, text: "hello wor".into() }, &mut fx);
+        assert!(fx.huds().contains(&"partial:hello wor".to_string()));
+        // ...but the injected text is Parakeet's deterministic decode, not the partial.
+        c.handle(CoordMsg::SegmentClosed(samples(16000)), &mut fx);
+        c.handle(CoordMsg::DecodeDone { generation: g, text: "hello world".into() }, &mut fx);
+        c.handle(CoordMsg::HotkeyUp, &mut fx);
+        c.handle(CoordMsg::TailSegment(samples(0)), &mut fx);
+        assert!(fx.has(&Call::Inject("hello world".into())));
+        assert!(!fx.has(&Call::Inject("hello wor".into())));
     }
 }

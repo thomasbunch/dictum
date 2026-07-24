@@ -19,6 +19,7 @@ mod model;
 mod overlay;
 mod reformat;
 mod replacements;
+mod stream;
 mod tray;
 mod voice;
 
@@ -63,6 +64,9 @@ pub struct AppState {
     /// Reformat (LLM) model status — parallel to `model_status`, never conflated
     /// with the ASR engine. Live updates on `reformat://status`.
     pub reformat_status: Arc<Mutex<ModelStatusDto>>,
+    /// Streaming-preview model status — parallel to `reformat_status`. Live
+    /// updates on `stream://status`.
+    pub stream_status: Arc<Mutex<ModelStatusDto>>,
     /// GPU capability probed once at startup (SETUP reformatter section).
     pub gpu: GpuInfoDto,
 }
@@ -89,6 +93,8 @@ struct RealEffects {
     asr: asr::AsrEngine,
     /// LLM reformatter worker (own thread; llama ctx is !Send). Fire-and-forget.
     reformat: reformat::ReformatEngine,
+    /// Streaming-preview worker (own thread; OnlineRecognizer). Fire-and-forget.
+    stream: stream::StreamEngine,
     /// The GPU-gated reformat SKU this session uses (path + presence check).
     reformat_spec: &'static model::ModelSpec,
     /// Capable-dGPU signal from the startup probe; resolves reformat_device="auto".
@@ -98,6 +104,7 @@ struct RealEffects {
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
     model_status: Arc<Mutex<ModelStatusDto>>,
     reformat_status: Arc<Mutex<ModelStatusDto>>,
+    stream_status: Arc<Mutex<ModelStatusDto>>,
     /// FILE TAG index over config.project_roots; rebuilt in the background at
     /// every session start (capture_foreground), read at apply_replacements.
     file_index: Arc<Mutex<filetag::Index>>,
@@ -227,7 +234,17 @@ impl Effects for RealEffects {
             return text;
         }
         let title = filetag::window_title(target_hwnd);
-        filetag::apply(&text, &self.file_index.lock().unwrap(), title.as_deref())
+        // Hold the index lock once for both the file-tag pass and the cue-gated
+        // repo-symbol pass (repo-vocab). apply_symbols runs LAST so filetag owns
+        // the at/dot/stem grammar and emits @path tokens the symbol pass skips.
+        let index = self.file_index.lock().unwrap();
+        let text = filetag::apply(&text, &index, title.as_deref());
+        let cue = cfg.symbol_cue.trim();
+        if cue.is_empty() {
+            text
+        } else {
+            filetag::apply_symbols(&text, &index, title.as_deref(), cue)
+        }
     }
     fn set_esc_armed(&mut self, armed: bool) {
         let _ = self.hotkey.lock().unwrap().arm_esc(armed);
@@ -271,6 +288,31 @@ impl Effects for RealEffects {
         *self.reformat_status.lock().unwrap() = dto.clone();
         let _ = self.app.emit("reformat://status", dto);
     }
+    // --- Streaming live preview --------------------------------------------
+    fn stream_feed(&mut self, generation: u64, samples: Vec<f32>) {
+        self.stream.feed(generation, samples);
+    }
+    fn ensure_stream_model(&mut self) {
+        self.stream.ensure_loaded();
+    }
+    fn unload_stream_model(&mut self) {
+        self.stream.unload();
+    }
+    fn stream_model_present(&mut self) -> bool {
+        model::files_present(model::stream_spec())
+    }
+    fn set_stream_preview(&mut self, on: bool) {
+        // Arm/disarm the audio frame tee AND resize the overlay window (the
+        // webview grows its CSS box off the same config flip). Both keyed on
+        // config.streaming_preview; called at boot and on the toggle.
+        self.audio.set_stream_preview(on);
+        crate::overlay::set_preview_height(&self.app, on);
+    }
+    fn announce_stream_status(&mut self, st: &ModelStatus) {
+        let dto = ModelStatusDto::from(st);
+        *self.stream_status.lock().unwrap() = dto.clone();
+        let _ = self.app.emit("stream://status", dto);
+    }
     fn now(&mut self) -> Instant {
         Instant::now()
     }
@@ -302,6 +344,7 @@ pub fn run() {
             commands::toggle_dictation,
             commands::get_model_status,
             commands::get_reformat_status,
+            commands::get_stream_status,
             commands::get_gpu_info,
             commands::import_replacements,
             commands::export_replacements,
@@ -355,6 +398,10 @@ pub fn run() {
             let init_use_gpu =
                 resolve_reformat_use_gpu(&init_cfg.reformat_device, gpu_info.offer_gpu_3b);
             let reformat = reformat::ReformatEngine::new(tx.clone(), init_use_gpu);
+            // Streaming-preview worker (own thread; OnlineRecognizer). Loads the
+            // companion Nemotron SKU lazily on the first preview session — never
+            // at boot (~632 MB). Off by default.
+            let stream = stream::StreamEngine::new(tx.clone());
             // The worker is pointed at the SKU below via fx.set_reformat_model once
             // fx exists — startup and config-swap share the same Effects seam.
             // Offline sideload: install a hand-dropped reformat .gguf if present.
@@ -397,6 +444,13 @@ pub fn run() {
             } else {
                 ModelStatusDto::Missing
             }));
+            // Streaming preview is lazy too: present-on-disk reads as Unloaded
+            // (loads on the first preview session), absent reads as Missing.
+            let stream_status = Arc::new(Mutex::new(if model::files_present(model::stream_spec()) {
+                ModelStatusDto::Unloaded
+            } else {
+                ModelStatusDto::Missing
+            }));
 
             app.manage(AppState {
                 config: config.clone(),
@@ -406,6 +460,7 @@ pub fn run() {
                 hotkey: hotkey.clone(),
                 model_status: model_status.clone(),
                 reformat_status: reformat_status.clone(),
+                stream_status: stream_status.clone(),
                 gpu: gpu_dto,
             });
 
@@ -450,6 +505,7 @@ pub fn run() {
                 audio,
                 asr,
                 reformat,
+                stream,
                 reformat_spec,
                 reformat_offer_gpu: gpu_info.offer_gpu_3b,
                 history,
@@ -457,6 +513,7 @@ pub fn run() {
                 hotkey: hotkey.clone(),
                 model_status,
                 reformat_status,
+                stream_status,
                 file_index,
                 overlay_click_through: true, // overlay::setup made it click-through
             };
@@ -464,6 +521,9 @@ pub fn run() {
             // use). Routed through the Effects seam so startup and any config swap
             // share one path.
             fx.set_reformat_model(reformat_spec.id.into());
+            // Arm the audio tee + size the overlay window to match persisted
+            // config, once at boot (off by default -> window stays 400x52).
+            fx.set_stream_preview(init_cfg.streaming_preview);
             std::thread::spawn(move || {
                 coordinator::Coordinator::run(rx, &mut fx, init_cfg);
             });

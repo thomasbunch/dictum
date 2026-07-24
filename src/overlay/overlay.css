@@ -7,6 +7,11 @@ html, body {
   overflow: hidden;
 }
 
+/* Streaming preview on: grow BOTH html and body to fit the second row. The
+   native window is resized in lockstep (overlay::set_preview_height); growing
+   only body would still be clipped by html's 52px + overflow:hidden. */
+html.preview, html.preview body { height: 76px; }
+
 /* M1 show: rise 8px + fade, 120ms. M2 hide: fade only, 100ms ease-in — the
    rise lives on .hud as a one-shot animation so the fade-out never jumps. */
 body {
@@ -94,6 +99,27 @@ body.show .hud { animation: hud-rise 120ms var(--ease); }
   color: var(--ink2);
   white-space: nowrap;
   flex: none;
+}
+
+/* Streaming live-preview second row (400x24, shares the strip's bottom edge).
+   Natural case (NOT value-sm's uppercase) — a live transcript in the model's
+   own lowercase reads as "the heard words", not a UI label. Empty/hidden + a
+   transparent window means the reserved 24px is invisible at idle. */
+.partial {
+  box-sizing: border-box;
+  width: 400px;
+  height: 24px;
+  line-height: 24px;
+  padding: 0 14px;
+  font: 400 10px "IBM Plex Mono", monospace; /* value-sm geometry, minus uppercase */
+  text-transform: none;
+  color: var(--ink2);
+  background: var(--field);
+  border: 1px solid var(--ink);
+  border-top: 0; /* shares the strip's bottom edge */
+  white-space: nowrap;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
 }
 
 [hidden] { display: none !important; }

@@ -227,7 +227,6 @@ body { background: var(--field); border: 1px solid var(--line); }
 .col-head { display: flex; align-items: baseline; justify-content: space-between; }
 .col-note { margin-top: 4px; color: var(--ink2); }
 .col-head .counter { color: var(--ink2); }
-.col-head .counter.heavy { color: var(--ink); font-weight: 600; }
 
 .vocab-add { display: flex; gap: 8px; margin-top: 12px; }
 .vocab-add input { flex: 1 1 0; min-width: 0; }
@@ -249,18 +248,20 @@ body { background: var(--field); border: 1px solid var(--line); }
   border-bottom: 1px solid var(--ink);
   color: var(--ink2);
 }
-.repl-head span:not(.x-col), .repl-row input { flex: 1 1 0; min-width: 0; }
+.repl-head span:not(.x-col), .repl-row input, .repl-row textarea { flex: 1 1 0; min-width: 0; }
 .repl-row {
-  display: flex; gap: 12px; align-items: center;
+  display: flex; gap: 12px; align-items: flex-start;
   padding: 4px 0;
   border-bottom: 1px solid var(--hair2);
 }
-.repl-row input {
+.repl-row input, .repl-row textarea {
   font: 400 11.5px "IBM Plex Mono", monospace;
   color: var(--ink);
   background: none; border: none; padding: 3px 0;
 }
-.repl-row input::placeholder { color: var(--ink2); text-transform: uppercase; }
+/* field-sizing:content auto-grows the snippet box to its lines (WebView2 123+). */
+.repl-row textarea { field-sizing: content; resize: none; line-height: 1.5; }
+.repl-row input::placeholder, .repl-row textarea::placeholder { color: var(--ink2); text-transform: uppercase; }
 .x-col { width: 12px; flex: none; }
 .repl-row .x { color: var(--ink2); background: none; border: none; cursor: pointer; font: 400 11.5px "IBM Plex Mono", monospace; padding: 0; width: 12px; flex: none; }
 .repl-row .x:hover { color: var(--ink); }
@@ -376,6 +377,8 @@ body { background: var(--field); border: 1px solid var(--line); }
 .inj-row .c-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inj-row input.c-path { width: auto; }
 .add-app { margin-top: 10px; }
+.cue-row { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.cue-row input { width: 200px; }
 
 .theme-cards { display: flex; gap: 10px; }
 .theme-card {
