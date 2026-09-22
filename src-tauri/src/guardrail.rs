@@ -82,14 +82,20 @@ pub fn check(input: &str, out: &str) -> Result<(), Trip> {
     // tokens — the abandoned branch of a spoken correction is meant to be dropped.
     let out_lower = out.to_lowercase();
     let out_tokens: std::collections::HashSet<String> = norm_tokens(out).into_iter().collect();
-    let toks: Vec<String> = reconstruct(input).split_whitespace().map(|t| t.to_lowercase()).collect();
+    let reconstructed = reconstruct(input);
+    let cased: Vec<&str> = reconstructed.split_whitespace().collect();
+    let toks: Vec<String> = cased.iter().map(|t| t.to_lowercase()).collect();
     for (i, raw) in toks.iter().enumerate() {
         let tok = raw.trim_matches(TRIM);
         if tok.is_empty() {
             continue;
         }
         let is_num = tok.chars().all(|c| c.is_ascii_digit());
-        if !is_num && !is_identifier(tok) {
+        // Identifier-ness is decided on the ORIGINAL casing. `toks` is lowercased
+        // for the containment test below, and a lowercased token can never
+        // satisfy is_identifier's camelCase branch — so deciding it here left
+        // `HudState` and `fileWatcher` (repo-vocab's own output) unprotected.
+        if !is_num && !is_identifier(cased[i].trim_matches(TRIM)) {
             continue;
         }
         // Numbers must match as a whole token ("30" must not "match" inside "300");
@@ -477,6 +483,20 @@ mod tests {
         let input = "don't delete the old config file before you check it";
         assert_eq!(check(input, "Delete the old config file before you check it."), Err(Trip::PolarityFlip));
     }
+    #[test]
+    fn camel_case_identifier_is_protected() {
+        // Regression: check() lowercased its tokens before asking is_identifier,
+        // which made the camelCase branch unreachable — so repo-vocab's own
+        // output (HudState, fileWatcher) was the one thing the preservation gate
+        // could not see.
+        let input = "the HudState enum needs another variant";
+        assert_eq!(
+            check(input, "The state enum needs another variant."),
+            Err(Trip::IdentifierLost)
+        );
+        assert!(check(input, "The HudState enum needs another variant.").is_ok());
+    }
+
     #[test]
     fn identifier_preserved_passes() {
         let input = "in remove_fillers we strip the comma but sometimes leave a space";
