@@ -2,9 +2,9 @@
 //! amplitude bars) -> CoordMsg. One persistent worker thread owns the cpal stream (`!Send`)
 //! and all DSP. See PLAN.md §3 and CONTRACTS.md.
 
-mod capture;
+pub(crate) mod capture;
 mod cues;
-mod resample;
+pub(crate) mod resample;
 mod vad;
 
 pub use capture::list_input_devices;
@@ -27,6 +27,8 @@ enum Ctrl {
     /// Ack fires once the tail has been dispatched, so `stop()` can return after it.
     Stop(Sender<()>),
     Abort,
+    /// Arm/disarm the streaming-preview frame tee (config-gated, boot + toggle).
+    SetStreamPreview(bool),
     Shutdown,
 }
 
@@ -64,6 +66,13 @@ impl AudioPipeline {
     pub fn abort(&self) {
         let _ = self.ctrl.send(Ctrl::Abort);
     }
+
+    /// Arm/disarm the streaming-preview frame tee. When on, each capture pass
+    /// tees its 16 kHz frames as `CoordMsg::StreamFrames`. Off (default) costs a
+    /// single bool check per pass.
+    pub fn set_stream_preview(&self, on: bool) {
+        let _ = self.ctrl.send(Ctrl::SetStreamPreview(on));
+    }
 }
 
 impl Drop for AudioPipeline {
@@ -78,6 +87,9 @@ impl Drop for AudioPipeline {
 fn worker_loop(ctrl_rx: Receiver<Ctrl>, coord_tx: Sender<CoordMsg>, vad_model_path: PathBuf) {
     let mut seg = Segmenter::new(&vad_model_path);
     let mut session: Option<Session> = None;
+    // Streaming-preview tee, config-gated at boot/toggle (survives across
+    // sessions). Default off — the majority pays one bool check per pass.
+    let mut stream_on = false;
 
     loop {
         // Idle: block for the next command (zero-latency wake). Recording: poll so we can
@@ -108,7 +120,7 @@ fn worker_loop(ctrl_rx: Receiver<Ctrl>, coord_tx: Sender<CoordMsg>, vad_model_pa
             }
             Some(Ctrl::Stop(ack)) => {
                 if let Some(s) = session.take() {
-                    s.finalize(&mut seg, &coord_tx);
+                    s.finalize(&mut seg, &coord_tx, stream_on);
                 }
                 let _ = ack.send(());
             }
@@ -116,6 +128,7 @@ fn worker_loop(ctrl_rx: Receiver<Ctrl>, coord_tx: Sender<CoordMsg>, vad_model_pa
                 session = None;
                 seg.reset();
             }
+            Some(Ctrl::SetStreamPreview(on)) => stream_on = on,
             Some(Ctrl::Shutdown) => break,
             None => {}
         }
@@ -125,14 +138,14 @@ fn worker_loop(ctrl_rx: Receiver<Ctrl>, coord_tx: Sender<CoordMsg>, vad_model_pa
         if let Some(s) = session.as_mut() {
             died = s.dead.lock().ok().and_then(|mut g| g.take());
             if died.is_none() {
-                s.process(&mut seg, &coord_tx);
+                s.process(&mut seg, &coord_tx, stream_on);
                 thread::sleep(Duration::from_millis(5));
             }
         }
         if let Some(err) = died {
             // Deliver buffered audio first, then report the death (PLAN §4.5).
             if let Some(s) = session.take() {
-                s.finalize(&mut seg, &coord_tx);
+                s.finalize(&mut seg, &coord_tx, stream_on);
             }
             let _ = coord_tx.send(CoordMsg::CaptureDead(err));
         }
@@ -171,8 +184,9 @@ impl Session {
     }
 
     /// Drain the ring, downmix, resample; leaves 16 kHz mono in `self.out16` and emits
-    /// `CaptureStarted` (first frames) + `Levels`.
-    fn pull(&mut self, coord_tx: &Sender<CoordMsg>) {
+    /// `CaptureStarted` (first frames) + `Levels`. When `stream_on`, also tees the
+    /// resampled frames as `StreamFrames` for the live preview decoder.
+    fn pull(&mut self, coord_tx: &Sender<CoordMsg>, stream_on: bool) {
         self.out16.clear();
         let avail = self.consumer.slots();
         let n = whole_frames(avail, self.channels);
@@ -196,19 +210,25 @@ impl Session {
         if !bars.is_empty() {
             let _ = coord_tx.send(CoordMsg::Levels(bars));
         }
+        // Streaming-preview tee: one send per non-empty pull (~200/sec at the 5 ms
+        // poll, ~80 samples each) — NOT the Levels/bar rate. `out16` is intact for
+        // the VAD path below (finalize/process only borrow it). Cost when off: the
+        // bool check. Fires while armed regardless of recording state; the
+        // coordinator drops frames outside a live preview session.
+        tee_stream_frames(&self.out16, stream_on, coord_tx);
     }
 
     /// One recording pass: pull audio, feed the VAD (emits mid-hold `SegmentClosed`).
-    fn process(&mut self, seg: &mut Segmenter, coord_tx: &Sender<CoordMsg>) {
-        self.pull(coord_tx);
+    fn process(&mut self, seg: &mut Segmenter, coord_tx: &Sender<CoordMsg>, stream_on: bool) {
+        self.pull(coord_tx, stream_on);
         seg.feed(&self.out16, coord_tx);
     }
 
     /// Stop / death: drain the last audio, flush the resampler tail, and dispatch one
     /// `TailSegment` (remaining VAD segments + open speech, concatenated). Consumes self so
     /// the stream is torn down.
-    fn finalize(mut self, seg: &mut Segmenter, coord_tx: &Sender<CoordMsg>) {
-        self.pull(coord_tx);
+    fn finalize(mut self, seg: &mut Segmenter, coord_tx: &Sender<CoordMsg>, stream_on: bool) {
+        self.pull(coord_tx, stream_on);
         let mut leftover = std::mem::take(&mut self.out16);
 
         self.out16.clear();
@@ -222,6 +242,15 @@ impl Session {
         // All remaining audio goes into the tail — no SegmentClosed after stop.
         let tail = seg.finish(&leftover);
         let _ = coord_tx.send(CoordMsg::TailSegment(tail));
+    }
+}
+
+/// Tee resampled 16 kHz frames to the streaming preview decoder. One send per
+/// non-empty pull while armed; a borrow, so `out16` is never mutated. Extracted
+/// from `pull` so the gated branch is unit-testable without a live cpal ring.
+fn tee_stream_frames(out16: &[f32], stream_on: bool, coord_tx: &Sender<CoordMsg>) {
+    if stream_on && !out16.is_empty() {
+        let _ = coord_tx.send(CoordMsg::StreamFrames(out16.to_vec()));
     }
 }
 
@@ -279,6 +308,30 @@ mod tests {
 
         let edge = bar_from_window(&[CLIP_THRESHOLD]);
         assert!(edge.clip);
+    }
+
+    #[test]
+    fn stream_tee_gated_and_exact() {
+        let (tx, rx) = mpsc::channel();
+        let frames = vec![0.1f32, 0.2, 0.3];
+
+        // Off: nothing teed.
+        tee_stream_frames(&frames, false, &tx);
+        assert!(rx.try_recv().is_err());
+
+        // On + empty: nothing teed (tee is per non-empty pull).
+        tee_stream_frames(&[], true, &tx);
+        assert!(rx.try_recv().is_err());
+
+        // On + non-empty: EXACTLY ONE StreamFrames carrying the same samples.
+        tee_stream_frames(&frames, true, &tx);
+        match rx.try_recv() {
+            Ok(CoordMsg::StreamFrames(s)) => assert_eq!(s, frames),
+            other => panic!("expected one StreamFrames, got {other:?}"),
+        }
+        assert!(rx.try_recv().is_err(), "more than one StreamFrames per pull");
+        // The tee borrows the slice — the VAD path still sees it intact.
+        assert_eq!(frames, vec![0.1f32, 0.2, 0.3]);
     }
 
     #[test]

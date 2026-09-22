@@ -6,7 +6,7 @@ export type Theme = "BONE" | "LEDGER" | "GLACIER" | "LILAC" | "OBSIDIAN";
 export type HotkeyMode = "hold" | "toggle" | "both";
 export type ReformatMode = "auto" | "on" | "off";
 export type ReformatDevice = "auto" | "gpu" | "cpu";
-export type ModelKind = "asr" | "llm";
+export type ModelKind = "asr" | "llm" | "stream";
 export type Retention = "keepNothing" | "hours24" | "days7" | "days30" | "forever";
 export type InjectBackend = "clipboard" | "sendInputUnicode";
 export type PasteShortcut = "ctrlV" | "ctrlShiftV";
@@ -33,6 +33,8 @@ export interface Config {
   appOverrides: Record<string, AppOverride>;
   /** Folders indexed for spoken file-name tagging (FILE TAG). Empty = off. */
   projectRoots: string[];
+  /** Spoken cue word that arms repo-symbol correction (repo-vocab). Empty = off. */
+  symbolCue: string;
   /** Active ASR model id (see modelInfo()). Unknown ids fall back to default. */
   modelId: string;
   /** LLM reformatter mode ("auto" GPU-gated | "on" | "off"). Default "auto". */
@@ -40,6 +42,13 @@ export interface Config {
   /** Reformat compute device ("auto" follows the GPU gate | "gpu" | "cpu").
    *  Only meaningful on a Vulkan build; a CPU build always runs on CPU. Default "auto". */
   reformatDevice: ReformatDevice;
+  /** Live streaming partial preview in the HUD (companion Nemotron model).
+   *  Never affects injected text — Parakeet stays authoritative. Default off. */
+  streamingPreview: boolean;
+  /** Built-in coding vocabulary applied as replacement rules. Default on. */
+  codingTerms: boolean;
+  /** ASR contextual biasing (hotwords + modified_beam_search). Experimental; default off. */
+  asrBiasing: boolean;
 }
 
 export interface LevelBar { amp: number; clip: boolean }
@@ -57,7 +66,9 @@ export type HudState =
 
 export type HudEvent =
   | { t: "state"; s: HudState }
-  | { t: "levels"; bars: LevelBar[] };
+  | { t: "levels"; bars: LevelBar[] }
+  // Live streaming transcript partial (companion Nemotron preview). HUD-only.
+  | { t: "partial"; text: string };
 
 export interface HistoryRecord {
   id: number;
@@ -114,6 +125,7 @@ export const api = {
   modelInfo: () => invoke<ModelInfo[]>("model_info"),
   getModelStatus: () => invoke<ModelStatus>("get_model_status"),
   getReformatStatus: () => invoke<ModelStatus>("get_reformat_status"),
+  getStreamStatus: () => invoke<ModelStatus>("get_stream_status"),
   getGpuInfo: () => invoke<GpuInfoDto>("get_gpu_info"),
   downloadModel: (id: string, onProgress: (p: DownloadProgress) => void) => {
     const ch = new Channel<DownloadProgress>();

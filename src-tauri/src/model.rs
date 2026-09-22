@@ -33,6 +33,9 @@ pub const DEFAULT_MODEL_ID: &str = "parakeet-tdt-0.6b-v2-int8";
 pub const REFORMAT_3B_ID: &str = "dictum-reformat-3b";
 pub const REFORMAT_1_5B_ID: &str = "dictum-reformat-1.5b";
 
+/// Streaming live-preview SKU id (companion Nemotron; never a batch recognizer).
+pub const STREAM_MODEL_ID: &str = "nemotron-speech-streaming-en-0.6b-560ms-int8";
+
 pub const MODELS: &[ModelSpec] = &[
     ModelSpec {
         id: "parakeet-tdt-0.6b-v2-int8",
@@ -87,6 +90,28 @@ pub const MODELS: &[ModelSpec] = &[
         kind: ModelKind::Llm,
         files: &[("dictum-reformat-1.5b-Q4_K_M.gguf", Some("ee87905270eb92b2ec00ed6536241dd1553caff4e2f7f8c6ea192faccaba2d72"))],
     },
+    // --- Streaming live-preview SKU: same 4-file sherpa layout as the ASR
+    //     archives, so the whole download/extract/verify/sideload path is reused.
+    //     Companion only (ModelKind::Stream) — never selectable as config.model_id.
+    ModelSpec {
+        id: STREAM_MODEL_ID,
+        display: "NEMOTRON STREAMING EN 0.6B",
+        dir_name: "sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25",
+        // Extracted on-disk total (632.0 MB) measured from the k2-fsa release
+        // archive on 2026-07-23.
+        size_mb: 632,
+        url: "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemotron-speech-streaming-en-0.6b-560ms-int8-2026-04-25.tar.bz2",
+        langs: "ENGLISH · LIVE PREVIEW",
+        kind: ModelKind::Stream,
+        // Hashes computed from the k2-fsa release archive on 2026-07-23 via the
+        // app's own sha256 path (sha256_file over each extracted .onnx).
+        files: &[
+            ("encoder.int8.onnx", Some("7d932213491ad355c6e5576705dc3494731a52af87d7a1b954559340147909d8")),
+            ("decoder.int8.onnx", Some("0be9702c2f427a2b6bb241d298e0d3836a558de1f5b9fd3018f1cce6e2b3fa98")),
+            ("joiner.int8.onnx", Some("a35eac38a22ebceb04d230ed7afe0d68f446ba6914a036b97f14fece95967e23")),
+            ("tokens.txt", None),
+        ],
+    },
 ];
 
 /// Spec for a config model id. Unknown ids (config written by a newer version)
@@ -102,6 +127,15 @@ pub fn reformat_spec(id: &str) -> &'static ModelSpec {
         .iter()
         .find(|m| m.id == id && m.kind == ModelKind::Llm)
         .unwrap_or_else(|| MODELS.iter().find(|m| m.id == REFORMAT_1_5B_ID).unwrap())
+}
+
+/// The streaming live-preview SKU (companion Nemotron). Kind-scoped so a stray
+/// id collision can never resolve it to an ASR/LLM spec.
+pub fn stream_spec() -> &'static ModelSpec {
+    MODELS
+        .iter()
+        .find(|m| m.id == STREAM_MODEL_ID && m.kind == ModelKind::Stream)
+        .unwrap()
 }
 
 /// The reformat SKU the GPU gate picks: 3B on a capable dGPU, else 1.5B CPU.
@@ -295,7 +329,8 @@ fn install_partial(spec: &'static ModelSpec, partial: &Path, progress: &impl Fn(
     // ASR = tar.bz2 archive (checksum decides which SKU); LLM = one .gguf we
     // already know the SKU of (download() took the spec).
     let installed = match spec.kind {
-        ModelKind::Asr => install_from_archive(partial).map(|_| ()),
+        // Stream is the same .tar.bz2 sherpa layout as Asr; hash-identity install.
+        ModelKind::Asr | ModelKind::Stream => install_from_archive(partial).map(|_| ()),
         ModelKind::Llm => install_single_file(spec, partial),
     };
     match installed {
@@ -583,6 +618,28 @@ mod tests {
         assert_eq!(reformat_spec(REFORMAT_3B_ID).kind, ModelKind::Llm);
         // A bad/unknown reformat id falls back to the CPU SKU, never to ASR.
         assert_eq!(reformat_spec("bogus").id, REFORMAT_1_5B_ID);
+    }
+
+    #[test]
+    fn stream_sku_is_hashed_transducer() {
+        let s = stream_spec();
+        assert_eq!(s.kind, ModelKind::Stream);
+        assert_eq!(s.id, STREAM_MODEL_ID);
+        assert_eq!(s.size_mb, 632);
+        // Exactly one Stream SKU in the registry.
+        assert_eq!(MODELS.iter().filter(|m| m.kind == ModelKind::Stream).count(), 1);
+        // Same 4 canonical sherpa filenames as the ASR archives -> the reused
+        // download/extract/resolve_staged path works unchanged.
+        let names: Vec<&str> = s.files.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["encoder.int8.onnx", "decoder.int8.onnx", "joiner.int8.onnx", "tokens.txt"]);
+        // 3 hashed .onnx + presence-only tokens.txt.
+        assert_eq!(s.files.iter().filter(|(_, h)| h.is_some()).count(), 3);
+        assert!(s.files.last().unwrap().1.is_none());
+        // Distinct id, never the batch default (the picker only writes asr ids —
+        // the real guard is the SETUP model card filtering kind==asr).
+        assert_ne!(STREAM_MODEL_ID, DEFAULT_MODEL_ID);
+        // The ASR expected_files test filters kind==Asr, so Stream is excluded there.
+        assert!(!MODELS.iter().filter(|m| m.kind == ModelKind::Asr).any(|m| m.id == STREAM_MODEL_ID));
     }
 
     #[test]

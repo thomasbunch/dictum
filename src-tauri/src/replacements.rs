@@ -23,11 +23,88 @@ pub fn apply_with_cursor(raw: &str, cfg: &Config) -> (String, Option<usize>) {
     if cfg.remove_fillers {
         text = remove_fillers(&text);
     }
+    // Canonical casing runs BEFORE the replacements loop: it re-cases only what
+    // the ear heard, never a rule's/snippet's literal output (a vocab term
+    // "GitHub" must not rewrite a rule-emitted "github.com" -> "GitHub.com").
+    // Sentinel-safe by construction — {cursor} only enters via rule values in
+    // the loop below, so none exists in the text yet.
+    text = canonicalize_vocab(&text, &cfg.vocabulary);
+    // Built-in coding terms sit HERE, in the vocabulary layer, for exactly the
+    // reason above: they must rewrite only what the ear heard, never a rule's or
+    // snippet's literal output (an "api" -> "API" term must not turn a
+    // rule-emitted "https://api.example.com" into "https://API.example.com").
+    // A user rule wanting a different answer runs after this and overrides it.
+    if cfg.coding_terms {
+        // Spoken word-lists of the user's own rules, tokenized once rather than
+        // per built-in.
+        let user: Vec<Vec<String>> = cfg
+            .replacements
+            .iter()
+            .map(|r| r.heard.to_lowercase().split_whitespace().map(str::to_string).collect())
+            .collect();
+        let spoken: Vec<String> =
+            text.to_lowercase().split_whitespace().map(str::to_string).collect();
+        for rule in crate::terms::rules() {
+            if shadowed(&rule.heard, &user, &spoken) {
+                continue;
+            }
+            text = apply_rule(&text, rule);
+        }
+    }
     for rule in &cfg.replacements {
         text = apply_rule(&text, rule);
     }
     let offset = cursor_back_offset(&text);
     (text.replace(CURSOR, ""), offset)
+}
+
+/// Is this built-in phrase contained inside a longer spoken phrase the user has
+/// written a rule for?
+///
+/// Built-ins run ahead of the user's rules so they can never re-case a rule's
+/// literal output — the URL hazard the vocabulary layer exists to avoid. That
+/// ordering has one cost, and this is it: a built-in can eat the opening of a
+/// longer phrase the user's rule was waiting for, so a snippet keyed on
+/// "dot net core" would never fire because "dot net" -> ".NET" already consumed
+/// it. Spelling out the longer phrase is the user saying which one they meant,
+/// so the built-in stands down.
+///
+/// Compares whitespace tokens rather than substrings: both sides are spoken
+/// phrases, so "api" must not count as contained in "rapid".
+fn shadowed(builtin_heard: &str, user_phrases: &[Vec<String>], spoken: &[String]) -> bool {
+    let b: Vec<String> = builtin_heard.to_lowercase().split_whitespace().map(str::to_string).collect();
+    if b.is_empty() {
+        return false;
+    }
+    user_phrases.iter().any(|u| {
+        u.len() > b.len()
+            && u.windows(b.len()).any(|w| w == b.as_slice())
+            // ...and only for takes where the longer phrase was actually spoken.
+            // Standing down unconditionally would let one "dot net core" rule
+            // disable "dot net" -> .NET in every other sentence the user dictates.
+            && spoken.windows(u.len()).any(|w| w == u.as_slice())
+    })
+}
+
+/// Canonical casing for vocabulary terms: each term is matched case-insensitively
+/// on word boundaries and rewritten to the term exactly as typed — "github" ->
+/// "GitHub". Casing only: a case-insensitive match spans the same characters, so
+/// this never changes spelling or length. Treats each term as a self-canonical
+/// rule (heard == printed) and reuses apply_rule's word-boundary + symbol logic.
+/// ponytail: recompiles a regex per term per utterance, exactly like the
+/// replacements loop already does; add a lazy cache only if profiling says so.
+/// ponytail: assumes simple 1:1 case folding (length-preserving, keeps the caret
+/// offset valid); vocab is proper nouns, so exotic full-fold pairs (ß↔SS,
+/// Turkish i) are out of scope.
+pub fn canonicalize_vocab(text: &str, vocab: &[String]) -> String {
+    let mut out = text.to_string();
+    for term in vocab {
+        if term.trim().is_empty() {
+            continue;
+        }
+        out = apply_rule(&out, &Replacement { heard: term.clone(), printed: term.clone() });
+    }
+    out
 }
 
 /// Chars between the LAST `{cursor}` sentinel and the end of the final text, or
@@ -48,6 +125,13 @@ fn remove_fillers(text: &str) -> String {
     s.trim().to_string()
 }
 
+/// Test-only window onto `apply_rule` for terms.rs's prose-safety corpus, which
+/// has to exercise the rules exactly as the chain runs them.
+#[cfg(test)]
+pub fn apply_rule_for_test(text: &str, rule: &Replacement) -> String {
+    apply_rule(text, rule)
+}
+
 fn apply_rule(text: &str, rule: &Replacement) -> String {
     if rule.heard.is_empty() {
         return text.to_string();
@@ -64,35 +148,6 @@ fn apply_rule(text: &str, rule: &Replacement) -> String {
     re.replace_all(text, NoExpand(&rule.printed)).into_owned()
 }
 
-// --- import/export -----------------------------------------------------
-
-/// One rule per line: `heard<TAB>printed` or `heard -> printed`. Blank lines skipped.
-pub fn parse_txt(input: &str) -> Vec<Replacement> {
-    input
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() {
-                return None;
-            }
-            let (heard, printed) = line.split_once('\t').or_else(|| line.split_once(" -> "))?;
-            Some(Replacement { heard: heard.trim().to_string(), printed: printed.trim().to_string() })
-        })
-        .collect()
-}
-
-pub fn to_txt(rules: &[Replacement]) -> String {
-    rules.iter().map(|r| format!("{}\t{}", r.heard, r.printed)).collect::<Vec<_>>().join("\n")
-}
-
-pub fn parse_json(input: &str) -> Result<Vec<Replacement>, String> {
-    serde_json::from_str(input).map_err(|e| e.to_string())
-}
-
-pub fn to_json(rules: &[Replacement]) -> String {
-    serde_json::to_string_pretty(rules).unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -101,7 +156,16 @@ mod tests {
         let mut cfg = Config::default();
         cfg.replacements = replacements;
         cfg.remove_fillers = remove_fillers;
+        // These tests exercise the rule engine, not the shipped term table —
+        // `apply_terms` below covers that, against the real data.
+        cfg.coding_terms = false;
         cfg
+    }
+
+    /// The built-in coding-term layer exactly as a user gets it: default config,
+    /// no rules of their own. Drives `terms::rules()` itself, not a copy of it.
+    fn apply_terms(input: &str) -> String {
+        apply(input, &Config::default())
     }
 
     fn rule(heard: &str, printed: &str) -> Replacement {
@@ -169,22 +233,94 @@ mod tests {
         assert_eq!(apply("the alumni erm gathered", &cfg), "the alumni gathered");
     }
 
-    #[test]
-    fn txt_round_trip() {
-        let rules = vec![rule("teh", "the"), rule("point break", "Point Break")];
-        assert_eq!(parse_txt(&to_txt(&rules)), rules);
+    // --- item 1: vocabulary canonical casing ---------------------------
+
+    fn cfg_vocab(vocab: Vec<&str>, replacements: Vec<Replacement>) -> Config {
+        let mut cfg = cfg_with(replacements, false);
+        cfg.vocabulary = vocab.into_iter().map(String::from).collect();
+        cfg
     }
 
     #[test]
-    fn txt_parses_arrow_format() {
-        let parsed = parse_txt("teh -> the\ngonna -> going to");
-        assert_eq!(parsed, vec![rule("teh", "the"), rule("gonna", "going to")]);
+    fn vocab_canonicalizes_casing() {
+        let cfg = cfg_vocab(vec!["GitHub"], vec![]);
+        assert_eq!(apply("push to github today", &cfg), "push to GitHub today");
     }
 
     #[test]
-    fn json_round_trip() {
-        let rules = vec![rule("api", "API"), rule("json", "JSON")];
-        assert_eq!(parse_json(&to_json(&rules)).unwrap(), rules);
+    fn vocab_word_boundary() {
+        let cfg = cfg_vocab(vec!["Go"], vec![]);
+        // no hit inside "good" or "golang".
+        assert_eq!(apply("go is good and golang rocks", &cfg), "Go is good and golang rocks");
+    }
+
+    #[test]
+    fn vocab_multiword() {
+        let cfg = cfg_vocab(vec!["Visual Studio"], vec![]);
+        assert_eq!(apply("open visual studio now", &cfg), "open Visual Studio now");
+    }
+
+    #[test]
+    fn vocab_symbol_term() {
+        let cfg = cfg_vocab(vec!["C++"], vec![]);
+        assert_eq!(apply("i code in c++ daily", &cfg), "i code in C++ daily");
+    }
+
+    #[test]
+    fn vocab_runs_before_replacements() {
+        // R1: vocab re-cases only what the ear heard, never a rule's literal
+        // output. A rule emitting a URL must survive verbatim even though a
+        // vocab term would otherwise re-case it (the URL-corruption hazard).
+        let cfg = cfg_vocab(vec!["GitHub"], vec![rule("my repo", "github.com/me")]);
+        assert_eq!(apply("push my repo", &cfg), "push github.com/me");
+    }
+
+    #[test]
+    fn vocab_empty_noop() {
+        let cfg = cfg_vocab(vec![], vec![]);
+        assert_eq!(apply("nothing changes here", &cfg), "nothing changes here");
+    }
+
+    #[test]
+    fn vocab_whitespace_entry_skipped() {
+        let cfg = cfg_vocab(vec!["   "], vec![]);
+        assert_eq!(apply("leave it alone", &cfg), "leave it alone");
+    }
+
+    #[test]
+    fn vocab_preserves_cursor_sentinel() {
+        // A vocab term "Cursor" re-cases the heard word, and the rule's {cursor}
+        // sentinel (added AFTER vocab) is untouched — length-preserved offset.
+        let cfg = cfg_vocab(vec!["Cursor"], vec![rule("hi", "hi{cursor}")]);
+        let (text, off) = apply_with_cursor("hi in cursor", &cfg);
+        assert_eq!(text, "hi in Cursor");
+        assert_eq!(off, Some(10)); // " in Cursor" tail
+    }
+
+    // --- item 3: preset-pack curation safety ---------------------------
+
+    #[test]
+    fn pack_entries_are_boundary_safe() {
+        // Sampled from packs.ts CODE_SYMBOLS / CODING_TERMS: prove the risky
+        // curated entries fire (or don't) exactly where intended.
+        let terms = cfg_with(vec![rule("engine x", "nginx")], false);
+        assert_eq!(apply("restart engine x now", &terms), "restart nginx now");
+        assert_eq!(apply("the engine ran hot", &terms), "the engine ran hot");
+
+        let golang = cfg_with(vec![rule("golang", "Go")], false);
+        assert_eq!(apply("golang rocks", &golang), "Go rocks");
+
+        // http must NOT corrupt https (word boundary at the 's').
+        let http = cfg_with(vec![rule("http", "HTTP"), rule("https", "HTTPS")], false);
+        assert_eq!(apply("http and https", &http), "HTTP and HTTPS");
+
+        // compound-first: "double colon" before "colon" yields "::" intact.
+        let colon = cfg_with(vec![rule("double colon", "::"), rule("colon", ":")], false);
+        assert_eq!(apply("path double colon method", &colon), "path :: method");
+
+        // "pipe symbol" (two-word form) leaves prose "pipe" untouched.
+        let pipe = cfg_with(vec![rule("pipe symbol", "|")], false);
+        assert_eq!(apply("pipe the output", &pipe), "pipe the output");
     }
 
     // --- snippets: multi-line + {cursor} -------------------------------
@@ -254,5 +390,297 @@ mod tests {
         let (text, off) = apply_with_cursor("greeting closing", &cfg);
         assert_eq!(text, "Hello Bye");
         assert_eq!(off, Some(0)); // last sentinel (from "closing") sits at the end
+    }
+
+    // ===================================================================
+    // ADVERSARIAL SUITE — attacks vocab canonicalization, the 67 preset
+    // pack entries (mirrored from src/main/packs.ts and driven through the
+    // real engine), and the multi-line/{cursor} machinery. These lock the
+    // invariants a "break it" pass must prove.
+    // ===================================================================
+
+    /// Exact mirror of packs.ts CODE_SYMBOLS (29), in array order.
+    fn code_symbols() -> Vec<Replacement> {
+        [
+            ("open brace", "{"), ("close brace", "}"),
+            ("open bracket", "["), ("close bracket", "]"),
+            ("open paren", "("), ("close paren", ")"),
+            ("open angle bracket", "<"), ("close angle bracket", ">"),
+            ("fat arrow", "=>"), ("thin arrow", "->"),
+            ("triple backtick", "```"),
+            ("double colon", "::"),
+            ("double ampersand", "&&"),
+            ("double pipe", "||"),
+            ("backtick", "`"),
+            ("colon", ":"), ("semicolon", ";"),
+            ("pipe symbol", "|"), ("ampersand", "&"),
+            ("underscore", "_"), ("backslash", "\\"),
+            ("forward slash", "/"), ("dollar sign", "$"),
+            ("hash symbol", "#"), ("at sign", "@"),
+            ("percent sign", "%"), ("asterisk", "*"),
+            ("tilde", "~"), ("caret", "^"),
+        ].iter().map(|(h, p)| rule(h, p)).collect()
+    }
+
+    /// CODE_SYMBOLS as the user gets it from the WORDS view. The coding-term
+    /// half of the old preset now ships built-in (terms::TERMS), so it is tested
+    /// through `apply_terms` against the real table instead of a mirror.
+    fn full_pack() -> Vec<Replacement> {
+        let v = code_symbols();
+        assert_eq!(v.len(), 29, "packs.ts CODE_SYMBOLS drifted from this mirror");
+        v
+    }
+
+    fn apply_pack(input: &str) -> String {
+        apply(input, &cfg_with(full_pack(), false))
+    }
+
+    #[test]
+    fn pack_corpus_every_entry_and_collisions() {
+        // (input, expected) — designed so exactly the intended rules fire under
+        // the FULL 67-rule pack. Covers every entry plus the substring/prose
+        // collisions that word boundaries must defuse.
+        let cases: &[(&str, &str)] = &[
+            // --- CODE_SYMBOLS: compounds survive their own singles -----------
+            ("open brace x close brace", "{ x }"),
+            ("open bracket close bracket open paren close paren", "[ ] ( )"),
+            ("open angle bracket close angle bracket", "< >"),
+            ("fat arrow and thin arrow", "=> and ->"),
+            ("triple backtick block", "``` block"),        // not eaten by `backtick`
+            ("double colon path", ":: path"),              // not eaten by `colon`
+            ("left double ampersand right", "left && right"),
+            ("a double pipe b pipe symbol c", "a || b | c"),
+            // every remaining single symbol, incl. backslash (one char each)
+            ("semicolon underscore backslash forward slash dollar sign hash symbol at sign percent sign asterisk tilde caret",
+             "; _ \\ / $ # @ % * ~ ^"),
+            // --- CODE_SYMBOLS: prose must NOT be corrupted -------------------
+            ("the engine ran hot and the pipe leaked", "the engine ran hot and the pipe leaked"),
+        ];
+        for (input, expected) in cases {
+            // Collapse the source-wrapped whitespace so multi-line literals above
+            // compare as single-spaced prose.
+            let want: String = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            let got: String = apply_pack(input).split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(got, want, "pack corpus failed on input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn built_in_terms_corpus() {
+        // Was the CODING_TERMS half of the preset corpus; now runs against
+        // terms::TERMS itself, so the shipped table is what is under test.
+        let cases: &[(&str, &str)] = &[
+            // spelling / multi-word — only a rule can do these
+            ("get hub git hub kube control py test engine x node js next js nest js               type script java script react js mongo db web socket local host post gres               c plus plus c sharp dot net golang",
+             "GitHub GitHub kubectl pytest nginx Node.js Next.js NestJS               TypeScript JavaScript React MongoDB WebSocket localhost Postgres               C++ C# .NET Go"),
+            // casing; http must not become https
+            ("github gitlab typescript javascript json yaml graphql oauth sqlite postgres               kubernetes redis api url html css http https sql",
+             "GitHub GitLab TypeScript JavaScript JSON YAML GraphQL OAuth SQLite Postgres               Kubernetes Redis API URL HTML CSS HTTP HTTPS SQL"),
+            // SUBSTRING SAFETY: every term here is a substring of a real word.
+            ("curl the rapid apiary in mysql and postgresql success",
+             "curl the rapid apiary in mysql and postgresql success"),
+            // golang != go: bare "go" is deliberately not a rule.
+            ("go to the repo", "go to the repo"),
+            // PROSE SAFETY: the terms the table deliberately leaves to the ear,
+            // because a rule would corrupt ordinary sentences.
+            ("i flew to tokyo and read about quarks", "i flew to tokyo and read about quarks"),
+        ];
+        for (input, expected) in cases {
+            let want: String = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            let got: String = apply_terms(input).split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(got, want, "built-in term corpus failed on input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn built_in_terms_respect_the_off_switch() {
+        let cfg = Config { coding_terms: false, ..Config::default() };
+        assert_eq!(apply("deploy engine x and json", &cfg), "deploy engine x and json");
+        assert_eq!(apply_terms("deploy engine x and json"), "deploy nginx and JSON");
+    }
+
+    #[test]
+    fn a_user_rule_overrides_a_built_in_term() {
+        // Built-ins run in the vocabulary layer, ahead of the user's rules, so a
+        // user rule sees their output and gets the last word.
+        let mut cfg = cfg_with(vec![rule("nginx", "NGINX")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("restart engine x now", &cfg), "restart NGINX now");
+    }
+
+    #[test]
+    fn a_longer_user_phrase_shadows_the_built_in_that_would_eat_it() {
+        // The ordering regression: built-ins run first, so without this a snippet
+        // keyed on "dot net core" could never fire — "dot net" -> ".NET" ate it.
+        let mut cfg = cfg_with(vec![rule("dot net core", "dotnet-core")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("migrate to dot net core today", &cfg), "migrate to dotnet-core today");
+        // The built-in still fires where the longer phrase is not what was said.
+        assert_eq!(apply("migrate to dot net today", &cfg), "migrate to .NET today");
+    }
+
+    #[test]
+    fn shadowing_compares_words_not_substrings() {
+        // "api" must not count as contained in "rapid", or one unrelated user
+        // rule would silently disable a built-in everywhere.
+        let mut cfg = cfg_with(vec![rule("rapid delivery", "RapidDelivery")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("the api is slow", &cfg), "the API is slow");
+    }
+
+    #[test]
+    fn built_in_terms_never_recase_rule_output() {
+        // The URL hazard the vocabulary layer exists to avoid: a rule emitting a
+        // literal must not then be re-cased by "api" -> "API".
+        let mut cfg = cfg_with(vec![rule("the endpoint", "https://api.example.com")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("hit the endpoint twice", &cfg), "hit https://api.example.com twice");
+    }
+
+    #[test]
+    fn pack_is_idempotent() {
+        // Casing rules run over spelling-rule output in the same pass; a second
+        // pass must be a fixpoint (no double-transform, no oscillation).
+        for once in ["github", "type script and typescript", "http https", "sqlite sql"] {
+            let a = apply_terms(once);
+            let b = apply_terms(&a);
+            assert_eq!(a, b, "built-in terms not idempotent for {once:?}");
+        }
+        for once in ["open brace x close brace", "double colon path"] {
+            let a = apply_pack(once);
+            let b = apply_pack(&a);
+            assert_eq!(a, b, "symbol pack not idempotent for {once:?}");
+        }
+    }
+
+    #[test]
+    fn pack_symbol_words_are_literal_in_prose() {
+        // LOCKED CURATION TRADEOFF, not a bug: CODE_SYMBOLS is opt-in and turns
+        // spoken symbol WORDS into glyphs by design. "underscore" (the verb) and
+        // "caret" (often meaning the text cursor) therefore convert in prose.
+        // Documented so a future edit doesn't "fix" it by accident.
+        assert_eq!(apply_pack("please underscore the caret position"), "please _ the ^ position");
+    }
+
+    #[test]
+    fn built_in_terms_fire_across_a_hyphen_boundary() {
+        // SAME LOCKED TRADEOFF, now on by default. A trailing '-' is a word
+        // boundary, so "engine x-axis" becomes "nginx-axis". It was an accepted
+        // cost when CODING_TERMS was a button the user pressed; shipping the
+        // table on by default spreads it to everyone who never opted in.
+        // Kept because "engine x" -> nginx is the single most valuable row in the
+        // table and the colliding phrase is vanishingly rare — but it is the one
+        // row whose blast radius grew, so it is asserted, not assumed.
+        assert_eq!(apply_terms("the engine x-axis"), "the nginx-axis");
+    }
+
+    // --- vocab canonicalization attacks --------------------------------
+
+    #[test]
+    fn vocab_length_preserved() {
+        // Casing-only invariant: for reachable (ASCII/Latin) terms the match spans
+        // the same characters, so both char AND byte length survive — this is what
+        // keeps the caret offset (computed later on the final text) trustworthy.
+        // ponytail: byte-length can only differ for Unicode compatibility-uppercase
+        // forms (Kelvin U+212A, ẞ) that ASR never emits; char length always holds.
+        let cfg = cfg_vocab(vec!["GitHub", "OAuth", "C++", "TypeScript"], vec![]);
+        let input = "push github using oauth in c++ and typescript";
+        let out = apply(input, &cfg);
+        assert_eq!(out, "push GitHub using OAuth in C++ and TypeScript");
+        assert_eq!(out.chars().count(), input.chars().count(), "vocab changed char length");
+        assert_eq!(out.len(), input.len(), "vocab changed byte length (ASCII terms)");
+    }
+
+    #[test]
+    fn vocab_regex_metachars_are_escaped() {
+        // Terms full of regex metacharacters must match LITERALLY, never as a
+        // pattern. If "A.B.C" leaked the dots as "any char", "axbxc" would also
+        // be rewritten — this proves regex::escape holds and nothing panics.
+        let cfg = cfg_vocab(vec!["C++", "C#", ".NET", "A.B.C", "kubectl+"], vec![]);
+        assert_eq!(
+            apply("i use c++ and c# and .net with a.b.c but not axbxc via kubectl+", &cfg),
+            "i use C++ and C# and .NET with A.B.C but not axbxc via kubectl+",
+        );
+    }
+
+    #[test]
+    fn vocab_fifty_terms_scale_and_boundaries() {
+        // VOCAB_MAX = 50. Prove the full-capacity vocab applies without panic and
+        // keeps word boundaries: canonical members re-case, non-members and
+        // substrings do not. Term "Word05" must not fire inside "Word050".
+        let terms: Vec<String> = (1..=50).map(|n| format!("Word{n:02}")).collect();
+        let cfg = cfg_vocab(terms.iter().map(String::as_str).collect(), vec![]);
+        assert_eq!(
+            apply("word05 and word50 and word050 and notaterm", &cfg),
+            "Word05 and Word50 and word050 and notaterm",
+        );
+    }
+
+    #[test]
+    fn vocab_unicode_terms() {
+        // Non-ASCII vocab: umlaut re-cases (1 char in, 1 char out), CJK is
+        // caseless so it rides through untouched, and neither corrupts neighbours.
+        let cfg = cfg_vocab(vec!["Ümlaut", "東京"], vec![]);
+        let out = apply("the ümlaut in 東京 today", &cfg);
+        assert_eq!(out, "the Ümlaut in 東京 today");
+        assert_eq!(out.chars().count(), "the ümlaut in 東京 today".chars().count());
+    }
+
+    #[test]
+    fn vocab_collides_with_pack_entry() {
+        // Same span targeted by a vocab term, a pack casing rule, AND a user
+        // multi-word rule. Vocab runs first, rules cascade in order — the result
+        // is deterministic and sane (no double-application artifact).
+        let cfg = cfg_vocab(
+            vec!["API"],
+            vec![rule("api", "API"), rule("api call", "endpoint")],
+        );
+        assert_eq!(apply("make the api call now", &cfg), "make the endpoint now");
+    }
+
+    #[test]
+    fn interaction_vocab_rule_pack_overlap_with_cursor() {
+        // vocab + snippet rule (bearing {cursor}) + pack casing rule all touching
+        // one utterance. Offset is measured on the FINAL text, so vocab's earlier
+        // rewrite cannot desync it.
+        let cfg = cfg_vocab(
+            vec!["GitHub"],
+            vec![rule("push", "git push{cursor}"), rule("github", "GitHub")],
+        );
+        let (text, off) = apply_with_cursor("push to github", &cfg);
+        assert_eq!(text, "git push to GitHub");
+        assert_eq!(off, Some(" to GitHub".chars().count())); // 10
+    }
+
+    // --- multi-line snippet apply-side behavior ------------------------
+
+    #[test]
+    fn snippet_crlf_and_cursor() {
+        // Textarea-authored value with Windows CRLF: inserted verbatim (NoExpand),
+        // and the caret offset counts CRLF as its two real chars.
+        let cfg = cfg_with(vec![rule("sig", "line1{cursor}\r\nline2")], false);
+        let (text, off) = apply_with_cursor("sig", &cfg);
+        assert_eq!(text, "line1\r\nline2");
+        assert_eq!(off, Some(7)); // "\r\nline2": \r \n l i n e 2
+    }
+
+    #[test]
+    fn snippet_only_newlines_and_trailing() {
+        // A value that is nothing but newlines survives; trailing newlines after a
+        // {cursor} still count toward the offset.
+        assert_eq!(apply("blank", &cfg_with(vec![rule("blank", "\n\n\n")], false)), "\n\n\n");
+        let cfg = cfg_with(vec![rule("x", "hello\n\n{cursor}")], false);
+        let (text, off) = apply_with_cursor("x", &cfg);
+        assert_eq!(text, "hello\n\n");
+        assert_eq!(off, Some(0)); // cursor at the very end, trailing newlines before it
+    }
+
+    #[test]
+    fn snippet_value_contains_txt_delimiter() {
+        // A snippet whose VALUE contains " -> " (the TXT import/export delimiter,
+        // owned by commands.rs). The apply side must treat it as literal text, not
+        // structure — NoExpand guarantees it.
+        let cfg = cfg_with(vec![rule("arrow", "a -> b -> c")], false);
+        assert_eq!(apply("arrow", &cfg), "a -> b -> c");
     }
 }

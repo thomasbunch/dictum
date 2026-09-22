@@ -19,6 +19,8 @@ export interface Ctx {
   modelStatus: ModelStatus;
   /** Reformat (LLM) model status — parallel to modelStatus, own event. */
   reformatStatus: ModelStatus;
+  /** Streaming-preview model status — parallel to reformatStatus, own event. */
+  streamStatus: ModelStatus;
   /** GPU capability probed at startup; drives the AUTO gate explanation. */
   gpu: GpuInfoDto | null;
   devices: string[];
@@ -38,6 +40,8 @@ export interface Ctx {
   modelCardUpdate: (() => void) | null;
   /** Set by SETUP while visible: repaints the reformat cards on status change. */
   reformatCardUpdate: (() => void) | null;
+  /** Set by SETUP while visible: repaints the preview card on status change. */
+  streamCardUpdate: (() => void) | null;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,6 +145,7 @@ const ctx: Ctx = {
   models: [],
   modelStatus: { k: "missing" },
   reformatStatus: { k: "missing" },
+  streamStatus: { k: "missing" },
   gpu: null,
   devices: [],
   records: [],
@@ -166,6 +171,7 @@ const ctx: Ctx = {
   meterFill: null,
   modelCardUpdate: null,
   reformatCardUpdate: null,
+  streamCardUpdate: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -349,6 +355,7 @@ function renderView(): void {
   ctx.meterFill = null;
   ctx.modelCardUpdate = null;
   ctx.reformatCardUpdate = null;
+  ctx.streamCardUpdate = null;
   viewEl.innerHTML = "";
   if (currentView === "tape") renderTape(ctx, viewEl);
   else if (currentView === "words") renderWords(ctx, viewEl);
@@ -401,7 +408,9 @@ function subscribeHudWithRetry(attempt: number): void {
           const peak = Math.max(...e.bars.map((b) => b.amp));
           ctx.meterFill.style.width = `${Math.min(100, Math.round(peak * 100))}%`;
         }
-      } else {
+      } else if (e.t === "state") {
+        // "partial" is a HUD-only streaming preview event — the main window
+        // (masthead status + meter) ignores it.
         announce(e.s);
         if (e.s.k !== "listening" && e.s.k !== "confirm_discard" && ctx.meterFill) {
           ctx.meterFill.style.width = "0%";
@@ -447,10 +456,11 @@ async function main() {
     updateFooter();
   });
 
-  const [models, status, reformatStatus, gpu, devices, version] = await Promise.all([
+  const [models, status, reformatStatus, streamStatus, gpu, devices, version] = await Promise.all([
     api.modelInfo(),
     api.getModelStatus(),
     api.getReformatStatus(),
+    api.getStreamStatus(),
     api.getGpuInfo(),
     api.listInputDevices(),
     getVersion().catch(() => "0.1.0"),
@@ -458,6 +468,7 @@ async function main() {
   ctx.models = models;
   ctx.modelStatus = status;
   ctx.reformatStatus = reformatStatus;
+  ctx.streamStatus = streamStatus;
   ctx.gpu = gpu;
   ctx.devices = devices;
   ctx.version = version;
@@ -480,6 +491,11 @@ async function main() {
   await listen<ModelStatus>("reformat://status", (e) => {
     ctx.reformatStatus = e.payload;
     ctx.reformatCardUpdate?.();
+  });
+  // Streaming-preview model status — parallel to reformat://status, own card.
+  await listen<ModelStatus>("stream://status", (e) => {
+    ctx.streamStatus = e.payload;
+    ctx.streamCardUpdate?.();
   });
   // A new line printed (§5.2): reload; the tape re-renders with ink-dry.
   const onHistoryChanged = debounce(() => {

@@ -19,6 +19,10 @@ mod model;
 mod overlay;
 mod reformat;
 mod replacements;
+#[cfg(test)]
+mod eval;
+mod stream;
+mod terms;
 mod tray;
 mod voice;
 
@@ -63,6 +67,9 @@ pub struct AppState {
     /// Reformat (LLM) model status — parallel to `model_status`, never conflated
     /// with the ASR engine. Live updates on `reformat://status`.
     pub reformat_status: Arc<Mutex<ModelStatusDto>>,
+    /// Streaming-preview model status — parallel to `reformat_status`. Live
+    /// updates on `stream://status`.
+    pub stream_status: Arc<Mutex<ModelStatusDto>>,
     /// GPU capability probed once at startup (SETUP reformatter section).
     pub gpu: GpuInfoDto,
 }
@@ -89,6 +96,8 @@ struct RealEffects {
     asr: asr::AsrEngine,
     /// LLM reformatter worker (own thread; llama ctx is !Send). Fire-and-forget.
     reformat: reformat::ReformatEngine,
+    /// Streaming-preview worker (own thread; OnlineRecognizer). Fire-and-forget.
+    stream: stream::StreamEngine,
     /// The GPU-gated reformat SKU this session uses (path + presence check).
     reformat_spec: &'static model::ModelSpec,
     /// Capable-dGPU signal from the startup probe; resolves reformat_device="auto".
@@ -98,12 +107,65 @@ struct RealEffects {
     hotkey: Arc<Mutex<hotkey::HotkeyManager>>,
     model_status: Arc<Mutex<ModelStatusDto>>,
     reformat_status: Arc<Mutex<ModelStatusDto>>,
+    stream_status: Arc<Mutex<ModelStatusDto>>,
     /// FILE TAG index over config.project_roots; rebuilt in the background at
     /// every session start (capture_foreground), read at apply_replacements.
     file_index: Arc<Mutex<filetag::Index>>,
     /// Last click-through value pushed to the overlay (avoid a main-thread hop
     /// per HUD state when nothing changed).
     overlay_click_through: bool,
+}
+
+/// The full deterministic post-ASR chain, in order: spoken voice commands, then
+/// vocabulary + built-in terms + user rules/snippets, then FILE TAG, then the
+/// cue-gated repo-symbol pass.
+///
+/// Extracted from `RealEffects::apply_replacements` so the eval harness can score
+/// the chain the app actually runs. A harness with its own copy of the ordering
+/// measures the copy, and the two drift the first time either is edited.
+pub(crate) fn deterministic_text(
+    raw: &str,
+    cfg: &Config,
+    index: &filetag::Index,
+    title: Option<&str>,
+) -> String {
+    // Deterministic pipeline order (PLAN §6): voice commands FIRST (they edit the
+    // spoken transcript), then replacements/snippets, then file tagging.
+    let voiced = crate::voice::apply(raw);
+    // ponytail: {cursor} caret placement is reserved, not wired. apply() strips
+    // the sentinel so text integrity is correct; the caret offset (from
+    // apply_with_cursor) is dropped here on purpose. Positioning it means firing
+    // N LEFT arrows after inject, which the inject path can't do reliably —
+    // Ctrl+V paste completes asynchronously (arrows would race the paste), the
+    // backend varies per app, and the elevated / focus-changed paths are
+    // clipboard-only with no caret at all. Wire it (thread the offset through
+    // Effects::inject) only once inject gains a synchronous paste-complete signal.
+    let text = crate::replacements::apply(&voiced, cfg);
+    if cfg.project_roots.is_empty() {
+        return text;
+    }
+    // apply_symbols runs LAST so filetag owns the at/dot/stem grammar and emits
+    // @path tokens the symbol pass skips.
+    let text = filetag::apply(&text, index, title);
+    let cue = cfg.symbol_cue.trim();
+    if cue.is_empty() {
+        text
+    } else {
+        filetag::apply_symbols(&text, index, title, cue)
+    }
+}
+
+/// The three sources of biasing terms, joined into sherpa's wire format.
+///
+/// Built-in terms are NOT gated on `config.coding_terms` — that switch governs
+/// the text-side rewrite rules, which fire on text with no acoustic evidence.
+/// Biasing only nudges the decoder toward a spelling the audio already supports,
+/// so it stays on with the rest of biasing (`config.asr_biasing`).
+fn hotword_list(vocabulary: &[String], index: &filetag::Index) -> String {
+    let mut entries = terms::hotwords();
+    entries.extend(vocabulary.iter().cloned());
+    entries.extend(index.hotwords());
+    terms::join_hotwords(entries)
 }
 
 /// Coordinator's earcon enum -> the audio module's `Cue`.
@@ -126,9 +188,17 @@ impl Effects for RealEffects {
         let roots = self.config.lock().unwrap().project_roots.clone();
         if !roots.is_empty() {
             let idx = self.file_index.clone();
+            let asr = self.asr.clone();
+            let vocab = self.config.lock().unwrap().vocabulary.clone();
             std::thread::spawn(move || {
                 let built = filetag::Index::build(&roots);
+                // The walk is ms-scale and a take lasts seconds, so this
+                // normally lands before the take's own Decode is queued and
+                // biases it. If it loses that race the take simply uses the
+                // previous session's list — stale, never wrong.
+                let hw = hotword_list(&vocab, &built);
                 *idx.lock().unwrap() = built;
+                asr.set_hotwords(hw);
             });
         }
         self.audio.start(device);
@@ -211,23 +281,14 @@ impl Effects for RealEffects {
     }
     fn apply_replacements(&mut self, raw: &str, target_hwnd: isize) -> String {
         let cfg = self.config.lock().unwrap().clone();
-        // Deterministic pipeline order (PLAN §6): voice commands FIRST (they edit
-        // the spoken transcript), then replacements/snippets, then file tagging.
-        let voiced = crate::voice::apply(raw);
-        // ponytail: {cursor} caret placement is reserved, not wired. apply() strips
-        // the sentinel so text integrity is correct; the caret offset (from
-        // apply_with_cursor) is dropped here on purpose. Positioning it means firing
-        // N LEFT arrows after inject, which the inject path can't do reliably —
-        // Ctrl+V paste completes asynchronously (arrows would race the paste), the
-        // backend varies per app, and the elevated / focus-changed paths are
-        // clipboard-only with no caret at all. Wire it (thread the offset through
-        // Effects::inject) only once inject gains a synchronous paste-complete signal.
-        let text = crate::replacements::apply(&voiced, &cfg);
-        if cfg.project_roots.is_empty() {
-            return text;
-        }
-        let title = filetag::window_title(target_hwnd);
-        filetag::apply(&text, &self.file_index.lock().unwrap(), title.as_deref())
+        let title = if cfg.project_roots.is_empty() {
+            None
+        } else {
+            filetag::window_title(target_hwnd)
+        };
+        // Hold the index lock across the whole chain (both filetag passes read it).
+        let index = self.file_index.lock().unwrap();
+        deterministic_text(raw, &cfg, &index, title.as_deref())
     }
     fn set_esc_armed(&mut self, armed: bool) {
         let _ = self.hotkey.lock().unwrap().arm_esc(armed);
@@ -242,6 +303,14 @@ impl Effects for RealEffects {
     }
     fn set_model(&mut self, id: String) {
         self.asr.set_model(id);
+    }
+    fn set_asr_biasing(&mut self, on: bool) {
+        self.asr.set_biasing(on);
+    }
+    fn refresh_hotwords(&mut self) {
+        let vocab = self.config.lock().unwrap().vocabulary.clone();
+        let hw = hotword_list(&vocab, &self.file_index.lock().unwrap());
+        self.asr.set_hotwords(hw);
     }
     // --- Reformat LLM ------------------------------------------------------
     fn reformat(&mut self, det: String, generation: u64) {
@@ -270,6 +339,31 @@ impl Effects for RealEffects {
         let dto = ModelStatusDto::from(st);
         *self.reformat_status.lock().unwrap() = dto.clone();
         let _ = self.app.emit("reformat://status", dto);
+    }
+    // --- Streaming live preview --------------------------------------------
+    fn stream_feed(&mut self, generation: u64, samples: Vec<f32>) {
+        self.stream.feed(generation, samples);
+    }
+    fn ensure_stream_model(&mut self) {
+        self.stream.ensure_loaded();
+    }
+    fn unload_stream_model(&mut self) {
+        self.stream.unload();
+    }
+    fn stream_model_present(&mut self) -> bool {
+        model::files_present(model::stream_spec())
+    }
+    fn set_stream_preview(&mut self, on: bool) {
+        // Arm/disarm the audio frame tee AND resize the overlay window (the
+        // webview grows its CSS box off the same config flip). Both keyed on
+        // config.streaming_preview; called at boot and on the toggle.
+        self.audio.set_stream_preview(on);
+        crate::overlay::set_preview_height(&self.app, on);
+    }
+    fn announce_stream_status(&mut self, st: &ModelStatus) {
+        let dto = ModelStatusDto::from(st);
+        *self.stream_status.lock().unwrap() = dto.clone();
+        let _ = self.app.emit("stream://status", dto);
     }
     fn now(&mut self) -> Instant {
         Instant::now()
@@ -302,6 +396,7 @@ pub fn run() {
             commands::toggle_dictation,
             commands::get_model_status,
             commands::get_reformat_status,
+            commands::get_stream_status,
             commands::get_gpu_info,
             commands::import_replacements,
             commands::export_replacements,
@@ -333,7 +428,8 @@ pub fn run() {
             let vad_path = res_dir.join("silero_vad.onnx");
 
             let audio = audio::AudioPipeline::new(tx.clone(), vad_path);
-            let asr = asr::AsrEngine::new(tx.clone(), init_cfg.model_id.clone());
+            let asr =
+                asr::AsrEngine::new(tx.clone(), init_cfg.model_id.clone(), init_cfg.asr_biasing);
 
             // GPU probe (once) decides the reformat SKU: 3B on a capable dGPU,
             // else 1.5B CPU. The worker points at the SKU's GGUF but loads it
@@ -355,6 +451,10 @@ pub fn run() {
             let init_use_gpu =
                 resolve_reformat_use_gpu(&init_cfg.reformat_device, gpu_info.offer_gpu_3b);
             let reformat = reformat::ReformatEngine::new(tx.clone(), init_use_gpu);
+            // Streaming-preview worker (own thread; OnlineRecognizer). Loads the
+            // companion Nemotron SKU lazily on the first preview session — never
+            // at boot (~632 MB). Off by default.
+            let stream = stream::StreamEngine::new(tx.clone());
             // The worker is pointed at the SKU below via fx.set_reformat_model once
             // fx exists — startup and config-swap share the same Effects seam.
             // Offline sideload: install a hand-dropped reformat .gguf if present.
@@ -397,6 +497,13 @@ pub fn run() {
             } else {
                 ModelStatusDto::Missing
             }));
+            // Streaming preview is lazy too: present-on-disk reads as Unloaded
+            // (loads on the first preview session), absent reads as Missing.
+            let stream_status = Arc::new(Mutex::new(if model::files_present(model::stream_spec()) {
+                ModelStatusDto::Unloaded
+            } else {
+                ModelStatusDto::Missing
+            }));
 
             app.manage(AppState {
                 config: config.clone(),
@@ -406,6 +513,7 @@ pub fn run() {
                 hotkey: hotkey.clone(),
                 model_status: model_status.clone(),
                 reformat_status: reformat_status.clone(),
+                stream_status: stream_status.clone(),
                 gpu: gpu_dto,
             });
 
@@ -439,7 +547,16 @@ pub fn run() {
             if !init_cfg.project_roots.is_empty() {
                 let idx = file_index.clone();
                 let roots = init_cfg.project_roots.clone();
-                std::thread::spawn(move || *idx.lock().unwrap() = filetag::Index::build(&roots));
+                // The walk also feeds ASR biasing, so push the list once it lands
+                // rather than leaving the first session biased on built-ins alone.
+                let asr_for_hotwords = asr.clone();
+                let vocab = init_cfg.vocabulary.clone();
+                std::thread::spawn(move || {
+                    let built = filetag::Index::build(&roots);
+                    let hw = hotword_list(&vocab, &built);
+                    *idx.lock().unwrap() = built;
+                    asr_for_hotwords.set_hotwords(hw);
+                });
             }
 
             let mut fx = RealEffects {
@@ -450,6 +567,7 @@ pub fn run() {
                 audio,
                 asr,
                 reformat,
+                stream,
                 reformat_spec,
                 reformat_offer_gpu: gpu_info.offer_gpu_3b,
                 history,
@@ -457,6 +575,7 @@ pub fn run() {
                 hotkey: hotkey.clone(),
                 model_status,
                 reformat_status,
+                stream_status,
                 file_index,
                 overlay_click_through: true, // overlay::setup made it click-through
             };
@@ -464,6 +583,12 @@ pub fn run() {
             // use). Routed through the Effects seam so startup and any config swap
             // share one path.
             fx.set_reformat_model(reformat_spec.id.into());
+            // Arm the audio tee + size the overlay window to match persisted
+            // config, once at boot (off by default -> window stays 400x52).
+            fx.set_stream_preview(init_cfg.streaming_preview);
+            // Built-in terms + the user's vocabulary are available at boot; the
+            // repo symbols arrive later from the walk above and replace this.
+            fx.refresh_hotwords();
             std::thread::spawn(move || {
                 coordinator::Coordinator::run(rx, &mut fx, init_cfg);
             });

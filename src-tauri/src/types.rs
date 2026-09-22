@@ -43,6 +43,18 @@ pub enum CoordMsg {
     /// Reformat model lifecycle (own status, parallel to ASR ModelStatus).
     ReformatModelStatus { status: ModelStatus },
 
+    // Streaming live preview (audio/stream modules -> coordinator). Companion
+    // Nemotron model; HUD-only, never touches injected text. Default off.
+    /// Continuous 16 kHz mono frames teed off the capture pass for the streaming
+    /// decoder (audio -> coord). Only teed while the preview toggle is on.
+    StreamFrames(Vec<f32>),
+    /// A streaming partial hypothesis (stream worker -> coord). `generation`
+    /// mirrors the ASR staleness guard so a stale partial (post-cancel/release)
+    /// is dropped.
+    PartialText { generation: u64, text: String },
+    /// Streaming preview model lifecycle (own status, parallel to ASR/reformat).
+    StreamModelStatus { status: ModelStatus },
+
     // System
     /// WM_POWERBROADCAST resume / session unlock — re-arm hotkey.
     SystemResumed,
@@ -111,6 +123,11 @@ pub enum HudEvent {
     State { s: HudState },
     /// Bars appended since the last event (audio-clocked).
     Levels { bars: Vec<LevelBar> },
+    /// Live streaming transcript partial (companion Nemotron preview). A
+    /// lightweight content update like `Levels`, NOT a `State` — no crossfade,
+    /// no relayout. Serializes as `{t:"partial", text}`. HUD-only; never the
+    /// injected text.
+    Partial { text: String },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -163,6 +180,11 @@ pub struct Config {
     /// Folders indexed for spoken file-name tagging (FILE TAG). Spoken names
     /// matching an indexed file print as `@relative/path`. Empty = feature off.
     pub project_roots: Vec<String>,
+    /// Spoken cue word that arms repo-symbol correction (repo-vocab): the run of
+    /// words right after this word is rewritten to the matching repo identifier.
+    /// Empty = feature off. Requires project_roots. Reads source-file contents
+    /// locally. Suggested value: "symbol".
+    pub symbol_cue: String,
     /// Active ASR model (model::MODELS registry id). Unknown ids fall back to
     /// the English default.
     pub model_id: String,
@@ -174,6 +196,30 @@ pub struct Config {
     /// soft-gate; "gpu"/"cpu" force it. Only meaningful on a Vulkan build — a CPU
     /// build always runs on CPU. Old configs default to "auto".
     pub reformat_device: String,
+    /// Live streaming partial preview in the HUD (companion Nemotron model).
+    /// Never affects injected text — Parakeet stays authoritative. Default off.
+    pub streaming_preview: bool,
+    /// Built-in coding vocabulary (terms::TERMS) applied as replacement rules.
+    /// Unlike the user's own rules these never enter the ledger, so this is the
+    /// off switch. Default ON: a dictation app whose pitch is agent-ready text
+    /// should spell `nginx` out of the box, not after the user finds a button.
+    pub coding_terms: bool,
+    /// ASR contextual biasing — feed the built-in terms, the user's vocabulary
+    /// and the repo symbol harvest to the recogniser as hotwords. Requires
+    /// modified_beam_search in place of greedy decoding.
+    ///
+    /// **Default OFF, deliberately, and this should flip.** k2-fsa/sherpa-onnx#3267
+    /// reports modified_beam_search dropping roughly 1-in-5 takes on TDT models
+    /// and is still open; a dropped take surfaces as an empty transcript — the
+    /// HUD cancels, nothing is injected, no error is shown. The only evidence
+    /// against it here is a single clean clip, which is a coin flip, and
+    /// `Config` is `#[serde(default)]` so this field decides what every existing
+    /// install does on upgrade.
+    ///
+    /// Flip the default once `eval_score` has run over recorded takes: an empty
+    /// decode in the `bias` column IS the dropped-take rate, measured on this
+    /// machine's own audio. See docs/PLAN-0.5.md §F.
+    pub asr_biasing: bool,
 }
 
 impl Default for Config {
@@ -192,9 +238,13 @@ impl Default for Config {
             remove_fillers: false,
             app_overrides: default_app_overrides(),
             project_roots: Vec::new(),
+            symbol_cue: String::new(),
             model_id: crate::model::DEFAULT_MODEL_ID.into(),
             reformat: "auto".into(),
             reformat_device: "auto".into(),
+            streaming_preview: false,
+            coding_terms: true,
+            asr_biasing: false,
         }
     }
 }
@@ -321,14 +371,16 @@ pub struct TakeMeta {
 // ---------------------------------------------------------------------------
 
 /// Which subsystem a model SKU feeds. ASR SKUs are the single-select recognizer
-/// (config.model_id); LLM SKUs are the reformatter (auto-picked, own section).
-/// Lets SETUP render the two kinds separately and keeps GGUF SKUs out of the
-/// ASR model-swap path.
+/// (config.model_id); LLM SKUs are the reformatter (auto-picked, own section);
+/// Stream is the companion live-preview recognizer (opt-in, never the batch
+/// recognizer). Lets SETUP render the kinds separately and keeps non-ASR SKUs
+/// out of the ASR model-swap path.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ModelKind {
     Asr,
     Llm,
+    Stream,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -340,7 +392,7 @@ pub struct ModelInfo {
     pub size_mb: u64,
     /// SETUP card line-2 fragment ("ENGLISH" / "25 LANGUAGES · AUTO-DETECT").
     pub langs: String,
-    /// "asr" | "llm" — SETUP renders each kind in its own section.
+    /// "asr" | "llm" | "stream" — SETUP renders each kind in its own section.
     pub kind: ModelKind,
 }
 

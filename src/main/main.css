@@ -2,7 +2,9 @@
    masthead, view, footer. Radius 0, no shadows, hairlines inside, strong ink
    rules on masthead + footer. */
 
-html, body, #app { height: 100%; }
+/* The card fills the window and .view is the only scroller — the document must
+   never scroll, or sub-pixel rounding at HiDPI prints a second scrollbar. */
+html, body, #app { height: 100%; overflow: hidden; }
 body { background: var(--field); border: 1px solid var(--line); }
 
 #app { display: flex; flex-direction: column; }
@@ -91,7 +93,48 @@ body { background: var(--field); border: 1px solid var(--line); }
 .dl-bar.striped .fill { display: none; }
 
 /* ---- View container ------------------------------------------------------ */
-.view { flex: 1 1 0; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; }
+/* scroll, not auto: the channel below is a permanent margin, so switching
+   views never reflows the content column by its width. */
+.view { flex: 1 1 0; min-height: 0; overflow-y: scroll; display: flex; flex-direction: column; }
+/* Chromium 127+ makes a childless scroller a tab stop; +2px offset would be
+   clipped by #app's overflow. Same inward ring as .trow. */
+.view:focus-visible { outline-offset: -2px; }
+
+/* ---- Scroll channel (§3) — the sprocket margin, mirrored ------------------
+   24px of bare --field walled by one 1px --hair rule: the sprocket's own edge
+   rule (line ~117), mirrored to the right of the tape, so every section
+   hairline terminates on a ruled margin instead of on a raw Chromium bar. No
+   dots — the dot tile means "the tape's feed edge" and belongs to one margin.
+   The carriage is --paper capped 1px --ink top and bottom (the keycap recipe
+   cut to two edges); its --hair left border keeps the wall unbroken as it
+   travels. Never add scrollbar-width/scrollbar-color anywhere in this window:
+   Chromium 121+ lets the standard properties win and silently reverts all of
+   this to the OS bar. Radius is restated because * (tokens.css:50) cannot
+   reach pseudo-elements (§10 r9). */
+.view::-webkit-scrollbar { width: 24px; height: 24px; }
+.view::-webkit-scrollbar-button { display: none; }
+.view::-webkit-scrollbar-track { background: var(--field); border-radius: 0; }
+.view::-webkit-scrollbar-track:vertical { border-left: 1px solid var(--hair); }
+.view::-webkit-scrollbar-track:horizontal { border-top: 1px solid var(--hair); }
+.view::-webkit-scrollbar-corner {
+  background: var(--field);
+  border-left: 1px solid var(--hair); border-top: 1px solid var(--hair);
+}
+.view::-webkit-scrollbar-thumb { background: var(--paper); border-radius: 0; }
+.view::-webkit-scrollbar-thumb:vertical {
+  min-height: 40px;
+  border-left: 1px solid var(--hair); /* the wall runs through the carriage */
+  border-top: 1px solid var(--ink); border-bottom: 1px solid var(--ink);
+}
+.view::-webkit-scrollbar-thumb:horizontal {
+  min-width: 40px;
+  border-top: 1px solid var(--hair);
+  border-left: 1px solid var(--ink); border-right: 1px solid var(--ink);
+}
+/* §4 hover fill. :active holds it so the carriage doesn't flick back to
+   --paper when the pointer strays mid-drag. Colour only — nothing reflows. */
+.view::-webkit-scrollbar-thumb:hover,
+.view::-webkit-scrollbar-thumb:active { background: var(--register); }
 
 /* ---- TAPE (§5.2) --------------------------------------------------------- */
 .toolbar {
@@ -184,7 +227,6 @@ body { background: var(--field); border: 1px solid var(--line); }
 .col-head { display: flex; align-items: baseline; justify-content: space-between; }
 .col-note { margin-top: 4px; color: var(--ink2); }
 .col-head .counter { color: var(--ink2); }
-.col-head .counter.heavy { color: var(--ink); font-weight: 600; }
 
 .vocab-add { display: flex; gap: 8px; margin-top: 12px; }
 .vocab-add input { flex: 1 1 0; min-width: 0; }
@@ -206,18 +248,20 @@ body { background: var(--field); border: 1px solid var(--line); }
   border-bottom: 1px solid var(--ink);
   color: var(--ink2);
 }
-.repl-head span:not(.x-col), .repl-row input { flex: 1 1 0; min-width: 0; }
+.repl-head span:not(.x-col), .repl-row input, .repl-row textarea { flex: 1 1 0; min-width: 0; }
 .repl-row {
-  display: flex; gap: 12px; align-items: center;
+  display: flex; gap: 12px; align-items: flex-start;
   padding: 4px 0;
   border-bottom: 1px solid var(--hair2);
 }
-.repl-row input {
+.repl-row input, .repl-row textarea {
   font: 400 11.5px "IBM Plex Mono", monospace;
   color: var(--ink);
   background: none; border: none; padding: 3px 0;
 }
-.repl-row input::placeholder { color: var(--ink2); text-transform: uppercase; }
+/* field-sizing:content auto-grows the snippet box to its lines (WebView2 123+). */
+.repl-row textarea { field-sizing: content; resize: none; line-height: 1.5; }
+.repl-row input::placeholder, .repl-row textarea::placeholder { color: var(--ink2); text-transform: uppercase; }
 .x-col { width: 12px; flex: none; }
 .repl-row .x { color: var(--ink2); background: none; border: none; cursor: pointer; font: 400 11.5px "IBM Plex Mono", monospace; padding: 0; width: 12px; flex: none; }
 .repl-row .x:hover { color: var(--ink); }
@@ -333,6 +377,8 @@ body { background: var(--field); border: 1px solid var(--line); }
 .inj-row .c-path { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .inj-row input.c-path { width: auto; }
 .add-app { margin-top: 10px; }
+.cue-row { margin-top: 14px; display: flex; flex-direction: column; gap: 6px; }
+.cue-row input { width: 200px; }
 
 .theme-cards { display: flex; gap: 10px; }
 .theme-card {

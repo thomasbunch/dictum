@@ -102,6 +102,24 @@ pub fn hide(app: &AppHandle) {
     });
 }
 
+/// Grow the overlay to fit the streaming-preview second row (400x76) or shrink
+/// back to the base strip (400x52). Called only at boot and on the config toggle
+/// (never per session), so the "HUD visible ≤50 ms" contract is untouched.
+/// `position_and_show` reads `outer_size()` dynamically, so the taller window
+/// still positions bottom-center. The webview grows its CSS box in lockstep off
+/// the same `config.streamingPreview` (the `html.preview` class).
+pub fn set_preview_height(app: &AppHandle, on: bool) {
+    let handle = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        if let Some(w) = handle.get_webview_window("overlay") {
+            let h = if on { 76.0 } else { 52.0 };
+            if let Err(e) = w.set_size(tauri::LogicalSize::new(400.0, h)) {
+                eprintln!("overlay: set_size failed: {e}");
+            }
+        }
+    });
+}
+
 fn gap_px(logical: f64, scale: f64) -> i32 {
     (logical * scale).round() as i32
 }

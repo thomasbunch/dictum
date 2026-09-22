@@ -11,3 +11,6 @@ finetune/.venv/
 finetune/out/
 finetune/data/staging/
 finetune/data/backup-*/
+eval/takes/
+eval/results.tsv
+.claude/reviews/

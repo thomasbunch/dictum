@@ -87,6 +87,15 @@ No other sizes/weights. Titlebar caption glyphs (`─ ▢ ✕`) are Mono 11 in `
 - Footer bar: padding 8px 24px, top border 1px `--ink`.
 - Sprocket margin: 28px wide, right border 1px `--hair`, dot pattern:
   `radial-gradient(circle 3px at 14px 14px, var(--dots) 97%, transparent)`, tile 28×28px.
+- Scroll channel: 24px wide, on both axes, present on every view — `.view` is the only scroller
+  and the gutter is reserved whether or not the content overflows, so switching views never
+  reflows the content column. Wall: 1px `--hair` on the content side (the sprocket margin's rule,
+  mirrored); the corner closes with both. No dot pattern — the dot tile means the tape's feed edge
+  and belongs to one margin only. Track: flat `--field`. Carriage: `--paper` fill, min 40px long,
+  1px `--ink` on the two short edges, 1px `--hair` on the wall side so the wall runs unbroken
+  through it; hover and drag fill `--register`. No arrow buttons. Press (§7 M8) and focus have no
+  scrollbar-part equivalent — transforms are inert on these parts and they take no focus; the
+  container's own ring draws at `outline-offset: -2px`, inward, because the card clips.
 - Section paddings inside views: 18px 24px. Hairline rules between sections: 1px `--hair2`.
 - Keycap chip: Mono 12, padding 4px 8px, border 1px `--ink`, background `--paper`, gap 4px.
 
