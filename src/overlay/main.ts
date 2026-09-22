@@ -292,4 +292,5 @@ function subscribeWithRetry(attempt: number) {
 }
 
 window.addEventListener("error", (e) => { document.title = `DICTUM JS-ERR ${e.message?.slice(0, 60)}`; });
-init();
+if (import.meta.env.DEV && location.search.includes("mock")) void import("../dev-mock").then(init);
+else init();

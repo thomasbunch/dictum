@@ -127,6 +127,7 @@ export function runDownloadFlow(id: string, slot: HTMLElement, sizeMb: number, o
 // State
 // ---------------------------------------------------------------------------
 let currentView: View = "tape";
+let titlebarEl: HTMLElement;
 let mastheadEl: HTMLElement;
 let viewEl: HTMLElement;
 let footerMetaEl: HTMLElement;
@@ -172,27 +173,27 @@ const ctx: Ctx = {
 // Masthead (§5.1): full on TAPE (status + counters + keycaps, or first run),
 // slim on WORDS/SETUP.
 // ---------------------------------------------------------------------------
-function statusLine(): string {
+/** Only trouble prints on the tape. A healthy machine says nothing here — the
+ * model card and input select in SETUP carry the details. */
+function statusLine(): string | null {
   const model = (() => {
     switch (ctx.modelStatus.k) {
-      case "ready": return `MODEL LOADED · ${activeModel(ctx)?.display ?? "PARAKEET-TDT 0.6B V2"}`;
+      case "ready": case "unloaded": return null;
       case "loading": return `MODEL LOADING · ${ctx.modelStatus.pct}%`;
-      case "unloaded": return "MODEL NOT LOADED (IDLE)";
       case "missing": return "NO MODEL ON THIS MACHINE";
       case "error": return "MODEL ERROR";
     }
   })();
-  const mic = ctx.devices.length
-    ? `MIC OK · ${(ctx.config.inputDevice ?? "SYSTEM DEFAULT").toUpperCase()}`
-    : "NO MICROPHONE";
-  return `${model} — ${mic} — LOCAL ONLY · ZERO EGRESS`;
+  const mic = ctx.devices.length ? null : "NO MICROPHONE";
+  const parts = [model, mic].filter((p): p is string => p !== null);
+  return parts.length ? parts.join(" — ") : null;
 }
 
 function startCaption(): string {
   switch (ctx.config.hotkeyMode) {
-    case "hold": return "HOLD TO SPEAK — THE TAPE PRINTS HERE";
-    case "toggle": return "TAP TO SPEAK — THE TAPE PRINTS HERE";
-    case "both": return "TAP OR HOLD — THE TAPE PRINTS HERE";
+    case "hold": return "HOLD TO SPEAK";
+    case "toggle": return "TAP TO SPEAK";
+    case "both": return "TAP OR HOLD TO SPEAK";
   }
 }
 
@@ -204,36 +205,16 @@ function isToday(ts: number): boolean {
 function buildCounters(): HTMLElement {
   const today = ctx.records.filter((r) => isToday(r.ts));
   const words = today.reduce((n, r) => n + r.text.trim().split(/\s+/).filter(Boolean).length, 0);
-  const days = new Set(ctx.records.map((r) => new Date(r.ts).toDateString())).size;
   const counter = (value: string, cap: string) =>
     h("div", { class: "counter" }, [
       h("div", { class: "value-lg" }, value),
       h("div", { class: "microlabel cap" }, cap),
     ]);
-  const wrap = h("div");
-  wrap.append(
-    h("div", { class: "counters" }, [
-      counter(words.toLocaleString("en-US"), "WORDS TODAY"),
-      counter(String(today.length), "PRINTED"),
-      counter(String(days), "DAYS RUNNING"),
-    ]),
-  );
-  // BY APP — driven by per-record exe data (§5.1 proposal).
-  if (ctx.records.length > 0) {
-    const byExe = new Map<string, number>();
-    for (const r of ctx.records) {
-      const k = r.exe ?? "other";
-      byExe.set(k, (byExe.get(k) ?? 0) + 1);
-    }
-    const sorted = [...byExe.entries()].sort((a, b) => b[1] - a[1]);
-    const top = sorted.slice(0, 4);
-    const rest = sorted.slice(4).reduce((n, [, c]) => n + c, 0);
-    const pct = (c: number) => Math.round((c / ctx.records.length) * 100);
-    const parts = top.map(([exe, c]) => `${exe} ${pct(c)}`);
-    if (rest > 0) parts.push(`other ${pct(rest)}`);
-    wrap.append(h("div", { class: "value-sm byapp" }, `BY APP ${parts.join(" · ")} %`));
-  }
-  return wrap;
+  // Two numbers, nothing else. (BY APP and DAYS RUNNING were cut: noise.)
+  return h("div", { class: "counters" }, [
+    counter(words.toLocaleString("en-US"), "WORDS TODAY"),
+    counter(ctx.totalLines.toLocaleString("en-US"), "ON THE TAPE"),
+  ]);
 }
 
 function buildStartPath(): HTMLElement {
@@ -281,21 +262,16 @@ function buildStartPath(): HTMLElement {
 
 function renderMasthead(): void {
   testActive = false;
+  for (const [key, b] of Object.entries(navButtons)) b.setAttribute("aria-current", String(key === currentView));
+  const tape = currentView === "tape";
+  // WORDS/SETUP have no masthead: the header band carries the strong rule.
+  mastheadEl.hidden = !tape;
+  titlebarEl.classList.toggle("strong", !tape);
   mastheadEl.innerHTML = "";
-  mastheadEl.classList.toggle("slim", currentView !== "tape");
+  if (!tape) return;
 
-  const nav = h("nav", { class: "nav", "aria-label": "View" });
-  navButtons = {};
-  for (const [v, label] of [["tape", "TAPE"], ["words", "WORDS"], ["setup", "SETUP"]] as [View, string][]) {
-    const b = h("button", { "aria-current": String(v === currentView), onclick: () => setView(v) }, label);
-    navButtons[v] = b;
-    nav.append(b);
-  }
-  mastheadEl.append(h("div", { class: "mast-top" }, [h("span", { class: "wordmark" }, "DICTUM"), nav]));
-
-  if (currentView !== "tape") return;
-
-  mastheadEl.append(h("div", { class: "value status-line" }, statusLine()));
+  const status = statusLine();
+  if (status) mastheadEl.append(h("div", { class: "value status-line" }, status));
 
   // Gate on the ACTIVE model's presence, not registry[0] (always the v2 SKU):
   // a config pointing at v3 with v2 absent must not force the first-run fetch
@@ -356,10 +332,7 @@ function renderView(): void {
 }
 
 function setView(v: View): void {
-  if (v === currentView) {
-    for (const [key, b] of Object.entries(navButtons)) b.setAttribute("aria-current", String(key === v));
-    return;
-  }
+  if (v === currentView) return;
   currentView = v;
   searchQuery = null;
   renderMasthead();
@@ -417,16 +390,34 @@ function subscribeHudWithRetry(attempt: number): void {
 // Boot
 // ---------------------------------------------------------------------------
 async function main() {
+  if (import.meta.env.DEV && location.search.includes("mock")) await import("../dev-mock");
   const app = document.getElementById("app");
   if (!app) return;
 
   const win = getCurrentWindow();
-  const titlebar = h("div", { class: "titlebar", "data-tauri-drag-region": true }, [
-    h("span", { class: "tb-name" }, "DICTUM"),
+  // Caption glyphs are inline SVG strokes, not font glyphs: crisp at 10px in
+  // every theme, no font-fallback surprises.
+  const glyph = (d: string) => {
+    const s = h("span", { class: "glyph", "aria-hidden": "true" });
+    s.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1"><path d="${d}"/></svg>`;
+    return s;
+  };
+  // One header band: wordmark · nav · captions. The nav is built once here;
+  // renderMasthead only re-syncs aria-current.
+  const nav = h("nav", { class: "nav", "aria-label": "View" });
+  navButtons = {};
+  for (const [v, label] of [["tape", "TAPE"], ["words", "WORDS"], ["setup", "SETUP"]] as [View, string][]) {
+    const b = h("button", { "aria-current": String(v === currentView), onclick: () => setView(v) }, label);
+    navButtons[v] = b;
+    nav.append(b);
+  }
+  titlebarEl = h("div", { class: "titlebar", "data-tauri-drag-region": true }, [
+    h("span", { class: "wordmark" }, "DICTUM"),
+    nav,
     h("div", { class: "tb-caption" }, [
-      h("button", { "aria-label": "Minimize", onclick: () => void win.minimize() }, "─"),
-      h("button", { "aria-label": "Maximize", onclick: () => void win.toggleMaximize() }, "▢"),
-      h("button", { "aria-label": "Close", onclick: () => void win.close() }, "✕"),
+      h("button", { "aria-label": "Minimize", onclick: () => void win.minimize() }, [glyph("M0 5.5H10")]),
+      h("button", { "aria-label": "Maximize", onclick: () => void win.toggleMaximize() }, [glyph("M0.5 0.5H9.5V9.5H0.5Z")]),
+      h("button", { "aria-label": "Close", onclick: () => void win.close() }, [glyph("M1 1L9 9M9 1L1 9")]),
     ]),
   ]);
 
@@ -438,7 +429,7 @@ async function main() {
     h("span", { class: "microlabel left" }, "NOTHING LEAVES THIS MACHINE"),
     footerMetaEl,
   ]);
-  app.append(titlebar, mastheadEl, viewEl, footer, liveEl);
+  app.append(titlebarEl, mastheadEl, viewEl, footer, liveEl);
 
   ctx.config = await initTheme((cfg) => {
     // In-place adopt: views hold references to ctx.config and persist whole-

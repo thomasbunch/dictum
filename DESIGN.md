@@ -73,7 +73,9 @@ Two families, bundled: **IBM Plex Sans** (400, 600) and **IBM Plex Mono** (400, 
 | Keycap | Mono | 12 / auto | 400 | 0 | caps | keycap chips |
 | HUD timer | Mono | 13 / auto | 400 | 0 | — | elapsed time, char count |
 
-No other sizes/weights. Titlebar caption glyphs (`─ ▢ ✕`) are Mono 11 in `--ink2`.
+No other sizes/weights. Caption glyphs (minimise · maximise · close) are inline SVG strokes,
+10×10, `stroke-width: 1`, `currentColor` at `--ink2` — not font glyphs, which fell back
+unevenly across themes.
 
 ## 3. Layout constants
 
@@ -81,12 +83,16 @@ No other sizes/weights. Titlebar caption glyphs (`─ ▢ ✕`) are Mono 11 in `
   menu is exempt). No shadows, no gradients, no glow, no blur.
 - Main window: default **880×700**, min 720×520, resizable. Content column is fluid; the
   sprocket margin and paddings are fixed.
-- Titlebar: 32px, bottom border 1px `--hair`.
-- Masthead: padding 20px 24px 16px, bottom border **1px `--ink`** (strong rules mark the
-  masthead and footer; everything inside uses hairlines).
+- Header band: **44px**, padding 0 8px 0 24px — wordmark · nav · caption controls on one
+  drag strip (the wordmark appears once in the window). Bottom border 1px `--hair` on TAPE,
+  where the masthead below carries the ink rule; **1px `--ink`** on WORDS/SETUP, which have
+  no masthead.
+- Masthead (TAPE only): padding 16px 24px, bottom border **1px `--ink`** (strong rules mark
+  the masthead and footer; everything inside uses hairlines).
 - Footer bar: padding 8px 24px, top border 1px `--ink`.
-- Sprocket margin: 28px wide, right border 1px `--hair`, dot pattern:
-  `radial-gradient(circle 3px at 14px 14px, var(--dots) 97%, transparent)`, tile 28×28px.
+- Sprocket margin: 24px wide, right border 1px `--hair`, square punched holes 6×6 `--dots`
+  on a 24px pitch, offset 9px from the left and top. Hidden while the tape is blank — holes
+  beside nothing read as an artifact, not a motif.
 - Section paddings inside views: 18px 24px. Hairline rules between sections: 1px `--hair2`.
 - Keycap chip: Mono 12, padding 4px 8px, border 1px `--ink`, background `--paper`, gap 4px.
 
@@ -100,49 +106,83 @@ No other sizes/weights. Titlebar caption glyphs (`─ ▢ ✕`) are Mono 11 in `
 | active/press | stamp-press: `transform: translateY(1px)`, no transition |
 | disabled | `opacity: 0.38`, `cursor: default`. **Never hidden.** |
 
-Toggle: track 36×16, 1px `--ink` border, `--paper` fill; knob 10×10 square, inset 2px;
-ON = knob `--ink` at right; OFF = knob `--ink2` at left. Radio: 10×10 square, 1px `--ink`
-border; selected = filled `--ink`. Text input: border 1px `--line`, `--paper` fill, padding
-6px 10px, Mono 11; focus adds 1px `--ink` border + focus outline; placeholder `--ink2` caps.
+Toggle: track 32×16, 1px `--ink` border; knob 10×10 square, inset 2px. **ON = track filled
+`--ink`, knob `--paper` at right; OFF = track `--paper`, knob `--ink2` at left.** (An OFF
+knob on a paper track was read as disabled, so the ON state fills.)
+
+**Segmented strip** — the single grammar for every small closed choice (hotkey mode,
+reformatter mode, reformatter compute, retention). One 1px `--ink` frame around the row,
+cells divided by 1px `--hair`, cell type Mono 10 caps, tracking .04em, min-width 56px,
+padding 6px 12px. Unselected `--ink2`; hover `--ink` on `--register`; **selected prints
+inverted: `--paper` on `--ink`**. Radio semantics (`role="radiogroup"` + `role="radio"`,
+arrow keys move and select, wrapping). The selected cell's caption prints under the strip
+(Value-sm, `--ink2`) — one line at a time, never one caption per option. Focus outline sits
+inside the cell (`outline-offset: -3px`) and turns `--paper` on the selected cell. Square
+radio inputs are **retired**: they read as checkboxes and their captions stacked into walls.
+
+Text input: border 1px `--line`, `--paper` fill, padding 6px 10px, Mono 11; focus adds 1px
+`--ink` border + focus outline; placeholder `--ink2` caps.
+
+**Scrollbar** (`::-webkit-scrollbar`; WebView2 is Chromium): 8px gutter, transparent track
+and corner, thumb `--line` inset to 4px via a 2px transparent border with
+`background-clip: padding-box`, `--ink2` on hover. **No buttons** (`::-webkit-scrollbar-button
+{ display: none }`). The default Chromium bar — 17px, arrow buttons, grey outside the
+palette — is never acceptable. Only the view scrolls (§5.1); a second bar on the document
+is a bug.
 
 ## 5. Surfaces
 
 ### 5.1 Main window — shell
 
-Views: **TAPE** (home) · **WORDS** · **SETUP**, switched by masthead nav (Label style; active =
-`--ink` + 2px bottom border; inactive = `--ink2`; hover = `--ink`). Tray deep-links: History →
-TAPE, Settings → SETUP. Footer on every view: left `NOTHING LEAVES THIS MACHINE` (Microlabel,
-`--ink2`), right live privacy meta (Value-sm): `TRANSCRIPTS · <retention> / AUDIO · <ON|OFF>`.
+Views: **TAPE** (home) · **WORDS** · **SETUP**, switched by nav in the header band (Label
+style; active = `--ink` + 2px bottom border; inactive = `--ink2`; hover = `--ink`). Tray
+deep-links: History → TAPE, Settings → SETUP. Footer on every view: left `NOTHING LEAVES
+THIS MACHINE` (Microlabel, `--ink2`), right live privacy meta (Value-sm):
+`TRANSCRIPTS · <retention> / AUDIO · <ON|OFF>`.
 
-Masthead (TAPE view only; WORDS/SETUP use the slim masthead: wordmark + nav + no counters):
-- Status line (Value, `--ink2`): `MODEL LOADED · PARAKEET-TDT 0.6B V2 — MIC OK · <device> —
-  LOCAL ONLY · ZERO EGRESS`. Degraded states print in place: `MODEL NOT LOADED (IDLE)`,
-  `NO MODEL ON THIS MACHINE`, `NO MICROPHONE`.
-- Counters (Value-lg + Microlabel captions): WORDS TODAY · PRINTED · DAYS RUNNING.
-- BY APP line (Value-sm, `--ink2`) under counters: `code.exe 41 · Terminal 22 · …  %`
-  — **proposal**, driven by per-record exe data; cut if unwanted.
-- Right: keycap chips of current hotkey + caption `HOLD TO SPEAK — THE TAPE PRINTS HERE`
-  (caption follows mode: TOGGLE → `TAP TO SPEAK…`, BOTH → `TAP OR HOLD…`). Clicking the chips
-  starts a test dictation targeted at a scratch line in the masthead. **Keycaps are the
-  "prominent start path" and mic test.**
+The `.view` element is the window's **only** scroller: `overflow: hidden auto`, so no view
+ever scrolls sideways and the chrome (header, masthead, footer) can never scroll away.
+Columns inside a view are fluid; fixed widths carry `max-width: 100%`.
+
+**Governing rule for the tape: the machine is quiet when it is well.** Anything a working
+setup would print every time it opens belongs in SETUP, not on the tape.
+
+Masthead — TAPE only. WORDS and SETUP have no masthead at all; their view starts under the
+header band.
+- Status line (Value, `--ink2`): **printed only when something is wrong**, and absent
+  otherwise. States: `MODEL LOADING · <n>%`, `NO MODEL ON THIS MACHINE`, `MODEL ERROR`,
+  `NO MICROPHONE`; two join with ` — `. A loaded model, the mic name and the zero-egress
+  slogan are **not** printed here: the model card and input select in SETUP carry the first
+  two, and the footer already carries the third on every view.
+- Counters (Value-lg + Microlabel captions): **WORDS TODAY · ON THE TAPE** (total kept
+  lines). PRINTED duplicated the line count; DAYS RUNNING counted distinct days in retained
+  history, so retention capped it and it read 0 — both cut.
+- Right: keycap chips of current hotkey + caption `HOLD TO SPEAK` (caption follows mode:
+  TOGGLE → `TAP TO SPEAK`, BOTH → `TAP OR HOLD TO SPEAK`). Clicking the chips starts a test
+  dictation targeted at a scratch line in the masthead. **Keycaps are the "prominent start
+  path" and mic test.**
 
 ### 5.2 TAPE view (home = history)
 
 - Toolbar under masthead: search input 260px, placeholder `SEARCH THE TAPE…`; right meta
-  (Value-sm): `<n> LINES · KEPT <retention> · AUDIO <ON|OFF>`. Search filters as you type;
-  active search shows `<n> LINES MATCH · ESC CLEARS` in the meta slot.
+  (Value-sm) is **empty at rest** and prints `<n> LINES MATCH · ESC CLEARS` only while a
+  search is live. The idle text (`<n> LINES · KEPT <retention> · AUDIO <ON|OFF>`) was cut:
+  the footer prints retention and audio, the masthead counts the lines.
 - Feed: sprocket margin left; rows padding 10px 24px 12px 16px, separated 1px `--hair2`.
 - Day rule: Microlabel (`TODAY — MON JUL 20`, then `SUN JUL 19`…) + hairline to the right edge.
-- Row anatomy: meta line = time (Value, `--ink2`) · exe chip (Mono 9.5, 1px `--hair` border,
-  `--paper` fill, padding 1px 6px) · spacer · char count `<n> CH · PRINTED` (Value-sm).
-  Text line = Body, `text-wrap: pretty`.
-- Row hover: fill `--register`; char count is replaced in place by actions `COPY` `STRIKE`
-  (Action style, 12px gap). **No layout shift** — same slot, same line-height.
-- Row expanded (click anywhere on row): fill `--paper`, 2px `--ink` left border; meta line gains
-  `· LINE #<id> · <dur> S · <NO CLIPPING|CLIPPED>`; full text (max-width 640px); printed
-  envelope trace of the take (SVG/canvas 280×24, stroke `--ink2` 1.4px, zero-line `--dots`;
-  oxide ticks only if that take clipped); injection line (Value-xs, `--ink2`):
-  `PRINTED TO <exe> · <TYPED|PASTED> · <n> CHARS`. Actions: COPY · STRIKE · CLOSE ✕.
+- Row anatomy at rest: meta line = time (Value, `--ink2`) · exe chip (Mono 9.5, 1px `--hair`
+  border, `--paper` fill, padding 1px 6px) · spacer. Text line = Body, `text-wrap: pretty`.
+  **Nothing else** — the per-row `<n> CH · PRINTED` was cut; a row states when, where and
+  what, and the numbers wait for the expansion.
+- Row hover: fill `--register`; the actions `COPY` `STRIKE` (Action style, 12px gap) occupy
+  the end of the meta line at all times and are `visibility: hidden` until hover or
+  expansion. **No layout shift** — the slot is always the same width.
+- Row expanded (click anywhere on row): fill `--paper`, 2px `--ink` left border; the meta
+  line gains **one** Value-sm `--ink2` run — `LINE #<id> · <dur> S · <n> CH · <TYPED|PASTED>`,
+  plus ` · CLIPPED` only when that take clipped. Then full text (max-width 640px) and the
+  printed envelope trace (SVG/canvas 280×24, stroke `--ink2` 1.4px, zero-line `--dots`;
+  oxide ticks only if that take clipped). Actions: COPY · STRIKE · CLOSE ✕. The separate
+  `PRINTED TO …` line is retired — it repeated the exe chip and the char count.
   Only one row expanded at a time. Expansion is instant (no height animation).
 - STRIKE: the row is replaced in place by the undo bar (fill `--register`, 1px `--line`
   border): `■ LINE PULLED` + `#<id> · <n> CH` + right `UNDO` (Action) + countdown `6 S`
@@ -174,8 +214,12 @@ Two columns (1fr/1fr, 1px `--hair` divider), plus filler strip and footer.
 
 ### 5.4 SETUP view
 
-Printed form: rows `grid-template-columns: 180px 1fr; gap: 24px`, padding 18px 24px, 1px
-`--hair2` rules between. Left cell: section Label + Value-sm note. Sections in order:
+Printed form: rows `grid-template-columns: 200px 1fr; gap: 24px` (140px/16px under 800px
+wide), padding 20px 24px, 1px `--hair2` rules between. Both cells carry `min-width: 0` so
+the right column shrinks with the window instead of pushing the gutter off-screen. Left
+cell: section Label + Value-sm note. A section with several distinct controls splits into
+**sub-rows** (`grid-template-columns: 80px 1fr; gap: 16px`), each labelled Microlabel
+`--ink2` — see REFORMATTER. Sections in order:
 
 1. **KEY** — note `THE ONLY KEY DICTUM OWNS.` Recorder chip: 1px `--ink` border, `--paper`,
    padding 10px 14px; chord in Mono 14 + caption `CLICK, THEN PRESS A CHORD` (Action style,
@@ -206,16 +250,16 @@ Printed form: rows `grid-template-columns: 180px 1fr; gap: 24px`, padding 18px 2
    Toggle UNLOAD ON IDLE (default OFF): `FREES ~600 MB. THE NEXT TAKE PAYS A RELOAD.`
 4. **TAPE & PRIVACY** — note `THE STATE IS PRINTED ON EVERY SURFACE.` Toggles KEEP
    TRANSCRIPTS (default ON) and KEEP AUDIO (default OFF, caption `OFF BY DEFAULT.
-   TRANSCRIPTS ONLY.`). Retention segmented row (radio semantics, chips Mono 10):
-   NOTHING · 24 H · 7 D · 30 D · FOREVER; selected = 1px `--ink` border + `--paper` fill +
-   `--ink` text; unselected = 1px `--line` border, `--ink2`. KEEP TRANSCRIPTS OFF disables
-   the retention row and search (disabled treatment, still visible).
+   TRANSCRIPTS ONLY.`). Retention is a **segmented strip** (§4): NOTHING · 24 H · 7 D ·
+   30 D · FOREVER. KEEP TRANSCRIPTS OFF disables the strip and search (disabled treatment,
+   still visible).
 5. **INJECTION** — note `PER-APP OVERRIDES.` Table (Mono 11): APP (190px) · METHOD (80px:
    PASTE|TYPE) · PASTE KEY (120px: CTRL+V | CTRL+SHIFT+V | —) · DELAY (80px: `<n> MS/CHUNK`,
    TYPE only) · `✕`. First row `DEFAULT — ALL APPS` (`--ink2`, not deletable). `ADD APP`
    link → row with exe input; METHOD/PASTE KEY/DELAY are click-to-cycle chips.
 6. **APPEARANCE** — note `APPLIES INSTANTLY.` Theme cards 72px wide, field-colored, name in
-   own ink; selected = 1px `--ink` + focus-style 2px outline offset 2px. Order: BONE ·
+   own ink; selected = **2px `--ink` border with padding reduced 1px to match**, so the
+   label never shifts. (The old border-plus-outline read as a stuck focus ring.) Order: BONE ·
    LEDGER · GLACIER · LILAC · OBSIDIAN. Apply on click, no confirm, no transition (§7).
 7. **ABOUT** — `DICTUM <ver> · APACHE-2.0 · SOURCE ↗` (Mono 11; SOURCE opens repo in
    default browser — the app itself still makes no calls). Statement (Value-sm, 1.7):
@@ -373,3 +417,10 @@ Rule zero: **nothing moves at idle.** Only transforms and opacity animate (wavef
 18. UNDO-6S: every destructive act on the tape offers a 6s in-place undo.
 19. CONTRAST: `--ink2` on `--field` ≥ 4.5:1 in every theme.
 20. STATES-COMPLETE: every interactive element implements default/hover/focus/disabled.
+21. ONE-SCROLLER: `.view` is the only scrolling element in the main window, and it never
+    scrolls sideways. A scrollbar on the document is a bug — usually an absolutely
+    positioned child whose parent is `static`, escaping the view's clip.
+22. SCROLLBAR-IS-DRAWN: scrollbars use the §4 spec (8px, square `--line` thumb, no
+    buttons). The Chromium default is never shipped.
+23. QUIET-WHEN-WELL: the tape prints machine status only when something is wrong. Anything
+    a healthy setup would print on every open belongs in SETUP.

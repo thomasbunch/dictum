@@ -2,7 +2,7 @@
 import { api } from "../bindings";
 import type { HistoryRecord } from "../bindings";
 import { h, debounce } from "../shared";
-import { chordDisplay, retentionLabel, type Ctx } from "./main";
+import { chordDisplay, type Ctx } from "./main";
 
 const DAYS = ["SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"];
 const MONTHS = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
@@ -88,13 +88,13 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
 
   // ---- Feed ----
   const feed = h("div", { class: "feed" });
-  host.append(h("div", { class: "feed-wrap" }, [h("div", { class: "sprocket" }), feed]));
+  const feedWrap = h("div", { class: "feed-wrap" }, [h("div", { class: "sprocket" }), feed]);
+  host.append(feedWrap);
 
-  const audioLabel = "AUDIO OFF";
+  // The meta slot speaks only while a search is live; the footer already
+  // prints retention and audio, and the masthead counts the lines.
   function updateMeta() {
-    meta.textContent = query
-      ? `${ctx.records.length} LINES MATCH · ESC CLEARS`
-      : `${ctx.totalLines} LINES · KEPT ${ctx.config.keepTranscripts ? retentionLabel(ctx.config.retention) : "NOTHING"} · ${audioLabel}`;
+    meta.textContent = query ? `${ctx.records.length} LINES MATCH · ESC CLEARS` : "";
   }
 
   function copyRec(rec: HistoryRecord) {
@@ -146,13 +146,15 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
 
     const metaLine = h("div", { class: "meta-line" });
     metaLine.append(h("span", { class: "value ts" }, fmtTime(rec.ts)));
+    if (rec.exe) metaLine.append(h("span", { class: "exe-chip" }, rec.exe));
     if (expanded) {
-      const parts = [rec.exe ?? "—", `LINE #${rec.id}`];
+      // The one place a take's numbers print: line, length, chars, how it landed.
+      const parts = [`LINE #${rec.id}`];
       if (rec.durMs > 0) parts.push(`${(rec.durMs / 1000).toFixed(1)} S`);
-      parts.push(rec.clipped ? "CLIPPED" : "NO CLIPPING");
+      parts.push(`${rec.text.length} CH`);
+      if (rec.method) parts.push(rec.method === "typed" ? "TYPED" : "PASTED");
+      if (rec.clipped) parts.push("CLIPPED");
       metaLine.append(h("span", { class: "value-sm exp-meta" }, parts.join(" · ")));
-    } else if (rec.exe) {
-      metaLine.append(h("span", { class: "exe-chip" }, rec.exe));
     }
     metaLine.append(h("span", { class: "fill-space" }));
 
@@ -168,26 +170,14 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
         }, "CLOSE ✕"),
       );
     }
-    const slot = h("div", { class: "slot" }, [
-      h("span", { class: "value-sm count" }, `${rec.text.length} CH · PRINTED`),
-      actions,
-    ]);
-    metaLine.append(slot);
+    metaLine.append(actions);
     row.append(metaLine);
 
     const text = h("div", { class: "body text" }, rec.text);
     if (!expanded && ctx.freshId === rec.id) text.classList.add("fresh"); // M6 ink-dry
     row.append(text);
 
-    if (expanded) {
-      if (rec.envelope.length > 1) row.append(buildTrace(rec));
-      if (rec.method) {
-        row.append(
-          h("div", { class: "value-xs inject-line" },
-            `PRINTED TO ${rec.exe ?? "—"} · ${rec.method === "typed" ? "TYPED" : "PASTED"} · ${rec.text.length} CHARS`),
-        );
-      }
-    }
+    if (expanded && rec.envelope.length > 1) row.append(buildTrace(rec));
 
     const toggle = () => {
       expandedId = expanded ? null : rec.id;
@@ -204,6 +194,7 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
     clearInterval(undoTimer);
     feed.innerHTML = "";
     updateMeta();
+    feedWrap.classList.toggle("blank", ctx.records.length === 0); // no sprocket beside nothing
 
     if (ctx.records.length === 0) {
       const blank = !query;
