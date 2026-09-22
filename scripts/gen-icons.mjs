@@ -1,7 +1,9 @@
-// Zero-dep icon generator (DESIGN.md §5.7). Hand-rolled PNG (node:zlib) + ICO.
+// Zero-dep TRAY glyph generator (DESIGN.md §3.1). Hand-rolled PNG (node:zlib).
 // Glyph = punched-tape cartridge: 1px-stroke outline with a dashed center line
 // (idle), solid center bar (recording), diagonal strike (mic error). Flat ink,
 // no AA (instrument look). Run: node scripts/gen-icons.mjs
+// The app icon is NOT generated here: src-tauri/icons/icon.svg is the source,
+// rasterized with `npx tauri icon` (recipe in the SVG header).
 import fs from "node:fs";
 import path from "node:path";
 import zlib from "node:zlib";
@@ -9,12 +11,10 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(fileURLToPath(import.meta.url), "..", "..", "src-tauri");
 const RES = path.join(ROOT, "resources");
-const ICONS = path.join(ROOT, "icons");
 
 // --- colors (DESIGN §1, BONE/OBSIDIAN ink) ---
 const INK = [33, 31, 26, 255];        // #211F1A  dark glyph (for light taskbar)
 const LIGHT = [234, 231, 224, 255];   // #EAE7E0  light glyph (for dark taskbar)
-const FIELD = [233, 230, 223, 255];   // #E9E6DF  BONE field (app icon)
 
 // --- pixel buffer helpers ---
 const mkbuf = (W, H, bg = [0, 0, 0, 0]) => {
@@ -105,38 +105,7 @@ function encodePng(W, H, rgba) {
   const idat = zlib.deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
-function encodeIco(imgs) {
-  const header = Buffer.alloc(6);
-  header.writeUInt16LE(1, 2); header.writeUInt16LE(imgs.length, 4);
-  const dir = Buffer.alloc(16 * imgs.length);
-  let offset = 6 + dir.length;
-  imgs.forEach((img, i) => {
-    const e = i * 16;
-    dir[e] = img.size >= 256 ? 0 : img.size;
-    dir[e + 1] = img.size >= 256 ? 0 : img.size;
-    dir.writeUInt16LE(1, e + 4);   // planes
-    dir.writeUInt16LE(32, e + 6);  // bpp
-    dir.writeUInt32LE(img.png.length, e + 8);
-    dir.writeUInt32LE(offset, e + 12);
-    offset += img.png.length;
-  });
-  return Buffer.concat([header, dir, ...imgs.map((i) => i.png)]);
-}
-
-// rounded-2px field square for the app icon
-function paperSquare(W, H) {
-  const b = mkbuf(W, H, FIELD);
-  const r = 2;
-  for (const [cx, cy, sx, sy] of [[0, 0, 1, 1], [W - 1, 0, -1, 1], [0, H - 1, 1, -1], [W - 1, H - 1, -1, -1]]) {
-    for (let i = 0; i < r; i++) for (let j = 0; j < r; j++) {
-      if ((i - r + 0.5) ** 2 + (j - r + 0.5) ** 2 > r * r) px(b, W, H, cx + sx * i, cy + sy * j, [0, 0, 0, 0]);
-    }
-  }
-  return b;
-}
-
 fs.mkdirSync(RES, { recursive: true });
-fs.mkdirSync(ICONS, { recursive: true });
 
 // --- tray icons: 3 states x 2 themes, 16px transparent ---
 const states = { idle: {}, rec: { solidBar: true }, err: { strike: true } };
@@ -152,14 +121,3 @@ for (const [name, opt] of Object.entries(states)) {
   }
 }
 
-// --- app icon: ink cartridge (recording bar, per thumbnail) on BONE field ---
-function appIcon(size) {
-  const b = paperSquare(size, size);
-  drawGlyph(b, size, size, INK, { solidBar: true });
-  return encodePng(size, size, b);
-}
-const ico = encodeIco([16, 32, 48, 256].map((s) => ({ size: s, png: appIcon(s) })));
-fs.writeFileSync(path.join(ICONS, "icon.ico"), ico);
-console.log(`icon.ico  ${ico.length} bytes  (16/32/48/256)`);
-fs.writeFileSync(path.join(ICONS, "128x128.png"), appIcon(128));
-console.log(`128x128.png`);

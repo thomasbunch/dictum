@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Dictum app icon (DESIGN.md §1: ink on LEDGER field; §6: oxide = pen head only).
+     Plex Sans SemiBold "D" outlined from @fontsource/ibm-plex-sans (fontTools SVGPathPen),
+     chart-recorder pen trace through the counter, oxide bar at the pen head.
+     Rasterize: npx tauri icon src-tauri/icons/icon.svg -o <tmp>  then copy
+     icon.ico + 128x128.png into src-tauri/icons (the rest are unused platforms). -->
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <!-- Counter (inner contour) of the D, same placement as the glyph below. -->
+    <clipPath id="counter">
+      <path transform="translate(172 842) scale(0.9456 -0.9456)"
+            d="M214 117H336Q385 117 421 136.5Q457 156 477 195.5Q497 235 497 294V404Q497 464 477 503Q457 542 421 561.5Q385 581 336 581H214Z"/>
+    </clipPath>
+  </defs>
+  <!-- paper tile + inset hairline rule (ledger card) -->
+  <rect x="0" y="0" width="1024" height="1024" rx="96" fill="#E9E6DF"/>
+  <rect x="56" y="56" width="912" height="912" rx="48" fill="none" stroke="#A8A296" stroke-width="5"/>
+  <!-- pen trace inside the counter -->
+  <g clip-path="url(#counter)">
+    <rect x="360" y="510" width="300" height="5" fill="#A8A296"/>
+    <polyline fill="none" stroke="#211F1A" stroke-width="16" stroke-linejoin="round" stroke-linecap="round"
+              points="404,512 420,482 436,564 452,428 468,630 484,358 500,648 516,412 532,588 548,456 564,552 580,488 596,524 612,512"/>
+    <rect x="606" y="448" width="13" height="128" fill="#C23B2B"/>
+  </g>
+  <!-- Plex Sans SemiBold D: cap height 698 units -> 660px, centered -->
+  <path fill="#211F1A" transform="translate(172 842) scale(0.9456 -0.9456)"
+        d="M82 0V698H336Q427 698 495 659Q563 620 600 542.5Q637 465 637 349Q637 233 600 155.5Q563 78 495 39Q427 0 336 0ZM214 117H336Q385 117 421 136.5Q457 156 477 195.5Q497 235 497 294V404Q497 464 477 503Q457 542 421 561.5Q385 581 336 581H214Z"/>
+</svg>
