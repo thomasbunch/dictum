@@ -35,7 +35,19 @@ pub fn apply_with_cursor(raw: &str, cfg: &Config) -> (String, Option<usize>) {
     // rule-emitted "https://api.example.com" into "https://API.example.com").
     // A user rule wanting a different answer runs after this and overrides it.
     if cfg.coding_terms {
+        // Spoken word-lists of the user's own rules, tokenized once rather than
+        // per built-in.
+        let user: Vec<Vec<String>> = cfg
+            .replacements
+            .iter()
+            .map(|r| r.heard.to_lowercase().split_whitespace().map(str::to_string).collect())
+            .collect();
+        let spoken: Vec<String> =
+            text.to_lowercase().split_whitespace().map(str::to_string).collect();
         for rule in crate::terms::rules() {
+            if shadowed(&rule.heard, &user, &spoken) {
+                continue;
+            }
             text = apply_rule(&text, rule);
         }
     }
@@ -44,6 +56,34 @@ pub fn apply_with_cursor(raw: &str, cfg: &Config) -> (String, Option<usize>) {
     }
     let offset = cursor_back_offset(&text);
     (text.replace(CURSOR, ""), offset)
+}
+
+/// Is this built-in phrase contained inside a longer spoken phrase the user has
+/// written a rule for?
+///
+/// Built-ins run ahead of the user's rules so they can never re-case a rule's
+/// literal output — the URL hazard the vocabulary layer exists to avoid. That
+/// ordering has one cost, and this is it: a built-in can eat the opening of a
+/// longer phrase the user's rule was waiting for, so a snippet keyed on
+/// "dot net core" would never fire because "dot net" -> ".NET" already consumed
+/// it. Spelling out the longer phrase is the user saying which one they meant,
+/// so the built-in stands down.
+///
+/// Compares whitespace tokens rather than substrings: both sides are spoken
+/// phrases, so "api" must not count as contained in "rapid".
+fn shadowed(builtin_heard: &str, user_phrases: &[Vec<String>], spoken: &[String]) -> bool {
+    let b: Vec<String> = builtin_heard.to_lowercase().split_whitespace().map(str::to_string).collect();
+    if b.is_empty() {
+        return false;
+    }
+    user_phrases.iter().any(|u| {
+        u.len() > b.len()
+            && u.windows(b.len()).any(|w| w == b.as_slice())
+            // ...and only for takes where the longer phrase was actually spoken.
+            // Standing down unconditionally would let one "dot net core" rule
+            // disable "dot net" -> .NET in every other sentence the user dictates.
+            && spoken.windows(u.len()).any(|w| w == u.as_slice())
+    })
 }
 
 /// Canonical casing for vocabulary terms: each term is matched case-insensitively
@@ -454,8 +494,7 @@ mod tests {
 
     #[test]
     fn built_in_terms_respect_the_off_switch() {
-        let mut cfg = Config::default();
-        cfg.coding_terms = false;
+        let cfg = Config { coding_terms: false, ..Config::default() };
         assert_eq!(apply("deploy engine x and json", &cfg), "deploy engine x and json");
         assert_eq!(apply_terms("deploy engine x and json"), "deploy nginx and JSON");
     }
@@ -467,6 +506,26 @@ mod tests {
         let mut cfg = cfg_with(vec![rule("nginx", "NGINX")], false);
         cfg.coding_terms = true;
         assert_eq!(apply("restart engine x now", &cfg), "restart NGINX now");
+    }
+
+    #[test]
+    fn a_longer_user_phrase_shadows_the_built_in_that_would_eat_it() {
+        // The ordering regression: built-ins run first, so without this a snippet
+        // keyed on "dot net core" could never fire — "dot net" -> ".NET" ate it.
+        let mut cfg = cfg_with(vec![rule("dot net core", "dotnet-core")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("migrate to dot net core today", &cfg), "migrate to dotnet-core today");
+        // The built-in still fires where the longer phrase is not what was said.
+        assert_eq!(apply("migrate to dot net today", &cfg), "migrate to .NET today");
+    }
+
+    #[test]
+    fn shadowing_compares_words_not_substrings() {
+        // "api" must not count as contained in "rapid", or one unrelated user
+        // rule would silently disable a built-in everywhere.
+        let mut cfg = cfg_with(vec![rule("rapid delivery", "RapidDelivery")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("the api is slow", &cfg), "the API is slow");
     }
 
     #[test]

@@ -28,9 +28,6 @@ export const CODE_SYMBOLS: Replacement[] = [
   { heard: "tilde", printed: "~" }, { heard: "caret", printed: "^" },
 ]; // 29 entries
 
-// heard -> printed jargon. Wired as REPLACEMENT RULES. No ordering hazards:
-// word boundaries keep "http" off "https", etc.
-
 /** Append pack entries missing from `existing` (dedupe by heard, trimmed +
  *  lower-cased). Mutates `existing`; returns count added. Re-adding = no-op;
  *  a user-edited row (same heard, changed printed) is preserved. */

@@ -47,6 +47,8 @@ const MAX_SCAN_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SYMBOLS: usize = 50_000;
 /// A distinctive (non-STOP) word-part must be at least this long to count.
 const MIN_PART: usize = 2;
+/// Shorter than this and a hotword boosts far more than it corrects.
+const MIN_HOTWORD: usize = 4;
 
 /// One multi-language definition-keyword alternation (NOT a parser): captures
 /// the identifier after fn/func/def/class/struct/... or an `export` form.
@@ -310,12 +312,7 @@ impl Index {
         }
         out
     }
-}
 
-/// Shorter than this and a hotword boosts far more than it corrects.
-const MIN_HOTWORD: usize = 4;
-
-impl Index {
     /// Walk each root (gitignore-aware, hidden files skipped) and index every
     /// file name. A repo walk is ms-scale; callers rebuild per session.
     pub fn build(roots: &[String]) -> Index {

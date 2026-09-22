@@ -33,7 +33,7 @@ const fn t(canonical: &'static str, spoken: &'static [&'static str]) -> Term {
     Term { canonical, spoken }
 }
 
-/// ponytail: ~120 terms, hand-picked for "the ear gets this wrong AND the fix is
+/// ponytail: 140 terms / 91 spoken rules, hand-picked for "the ear gets this wrong AND the fix is
 /// unambiguous". The curated 250-300 with 3-5 variants each is PLAN-0.5 item 4 —
 /// do that against the eval fixtures, not from a blank page.
 pub const TERMS: &[Term] = &[
@@ -78,7 +78,7 @@ pub const TERMS: &[Term] = &[
     t("ruff", &[]),
     t("mypy", &[]),             // "my pie" — biasing only
     t("Django", &[]),
-    t("FastAPI", &["fast api"]),
+    t("FastAPI", &[]),         // "we need a fast api" - biasing only
     t("Flask", &[]),
     // --- JS / TS ---------------------------------------------------------
     t("TypeScript", &["type script", "typescript"]),
@@ -145,7 +145,7 @@ pub const TERMS: &[Term] = &[
     t("PostgreSQL", &["postgre sql"]),
     t("MongoDB", &["mongo db"]),
     t("SQLite", &["sqlite", "sequel lite"]),
-    t("MySQL", &["my sql"]),
+    t("MySQL", &[]),           // "check my sql query" - biasing only
     t("ClickHouse", &["click house"]),
     t("Kafka", &[]),
     t("GraphViz", &["graph viz"]),
@@ -246,7 +246,7 @@ pub fn join_hotwords(entries: impl IntoIterator<Item = String>) -> String {
     for e in entries {
         // NUL too: the crate hands this straight to CString::new().unwrap(), so
         // one interior NUL from a hand-edited config would panic the ASR thread.
-        let e = e.replace(['/', ' '], " ");
+        let e = e.replace(['/', '\0'], " ");
         let e = e.trim();
         // Too short to bias safely, or nothing for the BPE encoder to hold onto.
         if e.chars().count() < 3 || !e.chars().any(|c| c.is_alphabetic()) {
@@ -333,31 +333,38 @@ mod tests {
     /// The real prose-safety bar. A single-word check cannot see a collision like
     /// "this error" -> thiserror or "my pie" -> mypy, and every one of those was
     /// present in the first draft of this table.
+    ///
+    /// Written as (spoken, expected) pairs rather than a blanket identity check:
+    /// some rules SHOULD fire in prose. "api" -> "API" and "sql" -> "SQL" are
+    /// casing fixes and are correct there, so an identity assertion would either
+    /// fail or have to be weakened into meaninglessness. Stating the expected
+    /// output per line keeps each allowance deliberate and visible.
     #[test]
     fn ordinary_prose_survives_every_rule() {
-        const PROSE: &[&str] = &[
-            "this error is confusing and i cannot reproduce it",
-            "i ate my pie and went back to work",
-            "jot it down before you forget",
-            "the ring had an onyx set into it",
-            "throw it in the bit bucket",
-            "that is the standard in this industry",
-            "did you see make fail again",
-            "i flew to tokyo last spring",
-            "the paper was about quarks and gluons",
-            "go and check the repo for me",
-            "the engine ran hot and the pipe leaked",
-            "we need a faster api response",
+        const PROSE: &[(&str, &str)] = &[
+            ("this error is confusing and i cannot reproduce it", "this error is confusing and i cannot reproduce it"),
+            ("i ate my pie and went back to work", "i ate my pie and went back to work"),
+            ("jot it down before you forget", "jot it down before you forget"),
+            ("the ring had an onyx set into it", "the ring had an onyx set into it"),
+            ("throw it in the bit bucket", "throw it in the bit bucket"),
+            ("that is the standard in this industry", "that is the standard in this industry"),
+            ("did you see make fail again", "did you see make fail again"),
+            ("i flew to tokyo last spring", "i flew to tokyo last spring"),
+            ("the paper was about quarks and gluons", "the paper was about quarks and gluons"),
+            ("go and check the repo for me", "go and check the repo for me"),
+            ("the engine ran hot and the pipe leaked", "the engine ran hot and the pipe leaked"),
+            // Casing fixes that SHOULD fire — the terms they could be confused
+            // with (MySQL, FastAPI) must not.
+            ("check my sql query before you run it", "check my SQL query before you run it"),
+            ("we need a fast api for the mobile client", "we need a fast API for the mobile client"),
+            ("we need a faster api response", "we need a faster API response"),
         ];
-        for line in PROSE {
+        for (line, want) in PROSE {
             let mut out = (*line).to_string();
             for r in rules() {
                 out = crate::replacements::apply_rule_for_test(&out, r);
             }
-            // "a faster api response" is the one deliberate exception: `api` ->
-            // `API` is a casing fix and is meant to fire in prose.
-            let want = line.replace(" api ", " API ");
-            assert_eq!(out, want, "a built-in rule corrupted prose: {line:?}");
+            assert_eq!(&out, want, "built-in rules changed prose wrongly: {line:?}");
         }
     }
 
@@ -387,8 +394,8 @@ mod tests {
 
     #[test]
     fn interior_nul_never_reaches_the_ffi() {
-        let joined = join_hotwords(vec!["tok io".into()]);
-        assert!(!joined.contains(' '));
+        let joined = join_hotwords(vec!["tok\0io".into()]);
+        assert!(!joined.contains('\0'));
         assert_eq!(joined, "tok io");
     }
 

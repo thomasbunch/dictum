@@ -277,7 +277,7 @@ function buildModelSection(ctx: Ctx): HTMLElement {
     }),
     toggleRow(
       "BIAS THE EAR",
-      "TUNES THE RECOGNIZER TOWARD CODING TERMS, YOUR WORDS, AND YOUR REPO. TURN OFF IF TAKES GO MISSING.",
+      "TUNES THE RECOGNIZER TOWARD CODING TERMS, YOUR WORDS, AND YOUR REPO. EXPERIMENTAL — A KNOWN UPSTREAM BUG CAN DROP A TAKE ENTIRELY. TURN OFF IF TAKES GO MISSING.",
       ctx.config.asrBiasing,
       false,
       (on) => {
@@ -287,7 +287,7 @@ function buildModelSection(ctx: Ctx): HTMLElement {
     ),
     toggleRow(
       "BUILT-IN CODING TERMS",
-      "SPELLS NGINX, KUBECTL, GITHUB AND ~60 MORE. YOUR OWN RULES OVERRIDE THEM.",
+      "SPELLS NGINX, KUBECTL, GITHUB AND THE REST OF THE DEV VOCABULARY. YOUR OWN RULES OVERRIDE THEM.",
       ctx.config.codingTerms,
       false,
       (on) => {

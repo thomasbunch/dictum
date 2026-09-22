@@ -206,12 +206,19 @@ pub struct Config {
     pub coding_terms: bool,
     /// ASR contextual biasing — feed the built-in terms, the user's vocabulary
     /// and the repo symbol harvest to the recogniser as hotwords. Requires
-    /// modified_beam_search in place of greedy decoding. Default ON.
+    /// modified_beam_search in place of greedy decoding.
     ///
-    /// The escape hatch is real, not ceremonial: k2-fsa/sherpa-onnx#3267 reports
-    /// modified_beam_search dropping roughly 1-in-5 takes on TDT models and is
-    /// still open. A dropped take surfaces as an empty transcript (the HUD
-    /// cancels, nothing is injected). If a user hits that, this is the switch.
+    /// **Default OFF, deliberately, and this should flip.** k2-fsa/sherpa-onnx#3267
+    /// reports modified_beam_search dropping roughly 1-in-5 takes on TDT models
+    /// and is still open; a dropped take surfaces as an empty transcript — the
+    /// HUD cancels, nothing is injected, no error is shown. The only evidence
+    /// against it here is a single clean clip, which is a coin flip, and
+    /// `Config` is `#[serde(default)]` so this field decides what every existing
+    /// install does on upgrade.
+    ///
+    /// Flip the default once `eval_score` has run over recorded takes: an empty
+    /// decode in the `bias` column IS the dropped-take rate, measured on this
+    /// machine's own audio. See docs/PLAN-0.5.md §F.
     pub asr_biasing: bool,
 }
 
@@ -237,7 +244,7 @@ impl Default for Config {
             reformat_device: "auto".into(),
             streaming_preview: false,
             coding_terms: true,
-            asr_biasing: true,
+            asr_biasing: false,
         }
     }
 }

@@ -47,7 +47,7 @@ export interface Config {
   streamingPreview: boolean;
   /** Built-in coding vocabulary applied as replacement rules. Default on. */
   codingTerms: boolean;
-  /** ASR contextual biasing (hotwords + modified_beam_search). Default on. */
+  /** ASR contextual biasing (hotwords + modified_beam_search). Experimental; default off. */
   asrBiasing: boolean;
 }
 

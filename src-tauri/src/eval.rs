@@ -287,14 +287,18 @@ const CONDITIONS: &[Condition] = &[
 ];
 
 fn config_for(c: &Condition, repo_root: &str) -> Config {
-    let mut cfg = Config::default();
-    cfg.coding_terms = c.coding_terms;
-    cfg.asr_biasing = !matches!(c.pass, Pass::Greedy);
-    if c.repo {
-        cfg.project_roots = vec![repo_root.to_string()];
-        cfg.symbol_cue = "symbol".into();
+    let (project_roots, symbol_cue) = if c.repo {
+        (vec![repo_root.to_string()], "symbol".to_string())
+    } else {
+        (Vec::new(), String::new())
+    };
+    Config {
+        coding_terms: c.coding_terms,
+        asr_biasing: !matches!(c.pass, Pass::Greedy),
+        project_roots,
+        symbol_cue,
+        ..Config::default()
     }
-    cfg
 }
 
 #[cfg(test)]
@@ -588,7 +592,7 @@ mod tests {
             eprintln!("as directional only — a handful of takes cannot separate the conditions.");
         }
 
-        let index = filetag::Index::build(&[repo_root.clone()]);
+        let index = filetag::Index::build(std::slice::from_ref(&repo_root));
         let hw_terms = terms::join_hotwords(terms::hotwords());
         let hw_repo = {
             let mut e = terms::hotwords();
@@ -618,20 +622,14 @@ mod tests {
         }
 
         // --- post-process and score
-        let mut report = String::from("condition\tsplit\ttakes\ttp\tfp\tfn\tprecision\trecall\tf1\tf1_nocase\n");
+        let mut report = String::from(
+            "condition\tsplit\ttakes\ttp\tfp\tfn\tprecision\trecall\tf1\tf1_nocase\tcorruption_per_100w\n",
+        );
         eprintln!(
             "\n{:<8} {:<6} {:>5} {:>4} {:>4} {:>4}  {:>5} {:>5} {:>6} {:>8}",
             "cond", "split", "takes", "tp", "fp", "fn", "P", "R", "F1", "F1(case-)"
         );
         eprintln!("{}", "-".repeat(66));
-
-        // Raw condition output per take, for the prose-corruption baseline.
-        let mut raw_out: HashMap<&str, String> = HashMap::new();
-        let raw_cfg = config_for(&CONDITIONS[0], &repo_root);
-        for (r, _) in &loaded {
-            let hyp = asr.get(&(Pass::Greedy, r.id.as_str())).cloned().unwrap_or_default();
-            raw_out.insert(r.id.as_str(), crate::deterministic_text(&hyp, &raw_cfg, &index, Some(&title)));
-        }
 
         for c in CONDITIONS {
             let cfg = config_for(c, &repo_root);
@@ -644,8 +642,11 @@ mod tests {
                 let e = by_split.entry(r.split).or_insert((Tally::default(), Tally::default(), 0));
                 e.2 += 1;
                 if r.split == Split::Prose {
-                    let base = raw_out.get(r.id.as_str()).cloned().unwrap_or_default();
-                    let (ch, tot) = changed_tokens(&base, &out);
+                    // Baseline is THIS condition's own ASR text. Using the greedy
+                    // output for every condition would score any word beam search
+                    // decoded differently as a pipeline rewrite, and this metric
+                    // exists precisely to separate those two things.
+                    let (ch, tot) = changed_tokens(&hyp, &out);
                     corrupt.0 += ch;
                     corrupt.1 += tot;
                 } else {
@@ -662,7 +663,7 @@ mod tests {
                     exact.precision(), exact.recall(), exact.f1(), lenient.f1()
                 );
                 report.push_str(&format!(
-                    "{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\n",
+                    "{}\t{}\t{}\t{}\t{}\t{}\t{:.4}\t{:.4}\t{:.4}\t{:.4}\t\n",
                     c.id, s.name(), n, exact.tp, exact.fp, exact.fna,
                     exact.precision(), exact.recall(), exact.f1(), lenient.f1()
                 ));
@@ -673,7 +674,14 @@ mod tests {
                     "{:<8} {:<6} {:>5} {:>4} {:>4} {:>4}  wrong rewrites per 100 words: {:.2}",
                     c.id, "prose", by_split.get(&Split::Prose).map(|e| e.2).unwrap_or(0), "", "", "", per100
                 );
-                report.push_str(&format!("{}\tprose\t{}\t\t\t\t\t\t\t{:.4}\n", c.id, corrupt.1, per100));
+                // `takes` holds a take count in every other row, so it must here
+                // too; corruption gets its own column instead of squatting in
+                // f1_nocase.
+                let takes = by_split.get(&Split::Prose).map(|e| e.2).unwrap_or(0);
+                report.push_str(&format!(
+                    "{}\tprose\t{}\t\t\t\t\t\t\t\t{:.4}\n",
+                    c.id, takes, per100
+                ));
             }
             eprintln!("{:<8} {}", "", c.note);
         }

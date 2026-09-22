@@ -123,7 +123,7 @@ struct RealEffects {
 /// Extracted from `RealEffects::apply_replacements` so the eval harness can score
 /// the chain the app actually runs. A harness with its own copy of the ordering
 /// measures the copy, and the two drift the first time either is edited.
-pub fn deterministic_text(
+pub(crate) fn deterministic_text(
     raw: &str,
     cfg: &Config,
     index: &filetag::Index,

@@ -1,5 +1,40 @@
 # Changelog
 
+## Unreleased
+
+Two waves sit on top of 0.3.0 and have not shipped in a release yet: the 0.4
+vocabulary/streaming work and the 0.5 coding-term accuracy work.
+
+### Added
+- **ASR contextual biasing** (`SETUP → BIAS THE EAR`, **off by default**): feeds
+  the built-in coding terms, your vocabulary and your repo's harvested symbols to
+  the recognizer as hotwords, decoding with `modified_beam_search`. A `bpe.vocab`
+  is derived from the model's own `tokens.txt` at first load and validated before
+  use — an unusable one falls back to greedy rather than risking the hard exit the
+  C++ takes on a malformed vocab. Off by default until the dropped-take rate from
+  k2-fsa/sherpa-onnx#3267 is measured on recorded takes.
+- **Built-in coding vocabulary** (`terms.rs`, on by default): one table feeding
+  two consumers — canonical spellings become ASR hotwords, spoken variants become
+  replacement rules. Replaces the opt-in CODING TERMS preset button, so `nginx`,
+  `kubectl` and `GitHub` spell correctly on a default install. Your own rules
+  still win: a longer phrase you have a rule for suppresses the built-in that
+  would have eaten it.
+- **Coding-term eval harness** (`eval/`): 133 recorded-speech fixtures across
+  library vocabulary, repo identifiers, precision-gated identifiers and prose
+  controls, scored by keyword F-score across five ablation conditions.
+  `cargo test --release -- --ignored eval_record` to record, `eval_score` to score.
+- 0.4 wave: `Config.vocabulary` wired to casing canonicalization, multi-line
+  snippet authoring with lossless TXT round-trip, CODE SYMBOLS preset pack,
+  repo-identifier harvesting behind a spoken cue, and an opt-in streaming live
+  preview in the HUD.
+
+### Fixed
+- Guardrail identifier preservation was blind to camelCase: `check()` lowercased
+  its tokens before testing them, so `HudState` and `fileWatcher` — exactly what
+  repo-vocab emits — were unprotected from the reformatter.
+- A test hardcoded the window title `— Dictum —` and failed its own liveness
+  assertion in any worktree or clone not named `Dictum`.
+
 ## 0.3.0 — 2026-07-22
 
 The flagship release: a fully local AI reformatter plus a deterministic trio.

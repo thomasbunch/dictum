@@ -306,7 +306,16 @@ const LONG_TAKE_SAMPLES: usize = 60 * 16_000;
 fn bpe_vocab(tokens: &Path) -> Option<PathBuf> {
     let vocab = tokens.with_file_name("bpe.vocab");
     if vocab.exists() {
-        return Some(vocab);
+        // Re-check the cached file rather than trusting the path. A vocab from an
+        // older build, or one a half-finished write left behind, is exactly the
+        // malformed input that takes the process down — and the user has no idea
+        // this file exists, so "delete it and retry" is not a recovery they can
+        // perform. Cheap: ~1k lines.
+        if std::fs::read_to_string(&vocab).is_ok_and(|v| well_formed(&v)) {
+            return Some(vocab);
+        }
+        eprintln!("asr: cached bpe.vocab is malformed — re-deriving");
+        let _ = std::fs::remove_file(&vocab);
     }
     let src = std::fs::read_to_string(tokens).ok()?;
     let mut out = String::with_capacity(src.len() * 2);
@@ -319,9 +328,54 @@ fn bpe_vocab(tokens: &Path) -> Option<PathBuf> {
         out.push_str(&(-idx).to_string());
         out.push('\n');
     }
-    std::fs::write(&vocab, out).ok()?;
+    // Validate BEFORE sherpa sees it. Only one ASR SKU has ever been through this
+    // path live, and the two rejections the shipped library can raise here —
+    // "Each line in vocab should contain two items" and "failed to build
+    // double-array: wrong key order" — are both `_Exit()`, so a SKU whose
+    // tokens.txt has a shape we did not anticipate would kill the app on model
+    // switch with no dialog and no log. Failing closed costs biasing; not
+    // failing closed costs the process.
+    if !well_formed(&out) {
+        eprintln!("asr: derived bpe.vocab is malformed — biasing off, decoding greedily");
+        return None;
+    }
+    // Write atomically. std::fs::write is not atomic, and a truncated file here
+    // would be cached and re-read forever.
+    let tmp = vocab.with_extension("vocab.tmp");
+    std::fs::write(&tmp, &out).ok()?;
+    if std::fs::rename(&tmp, &vocab).is_err() {
+        // Lost a race (rename onto an existing file fails on Windows) — someone
+        // else derived it. Drop ours and use theirs, after the same check.
+        let _ = std::fs::remove_file(&tmp);
+        if !std::fs::read_to_string(&vocab).is_ok_and(|v| well_formed(&v)) {
+            return None;
+        }
+    }
     Some(vocab)
 }
+
+/// Does this vocab satisfy what ssentencepiece requires of it?
+///
+/// Two items per line, and no duplicate pieces — a duplicate key is what makes
+/// the double-array build fail. Deliberately checks the text we are about to
+/// hand over rather than the tokens.txt we derived it from, so it stays true no
+/// matter how the derivation changes.
+fn well_formed(vocab: &str) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut lines = 0usize;
+    for line in vocab.lines() {
+        let mut it = line.split_whitespace();
+        let (Some(piece), Some(score), None) = (it.next(), it.next(), it.next()) else {
+            return false;
+        };
+        if score.parse::<i64>().is_err() || !seen.insert(piece.to_string()) {
+            return false;
+        }
+        lines += 1;
+    }
+    lines > 0
+}
+
 
 // ponytail: to_string_lossy is fine for ASCII %APPDATA% paths; sherpa's C API
 // takes a UTF-8 char* and non-ASCII usernames are a known upstream limitation.
@@ -354,10 +408,11 @@ mod tests {
             "<unk>\t0\n\u{2581}t\t-1\n\u{2581}the\t-2\n<blk>\t-3\n"
         );
 
-        // Derived once: a second call reuses the file instead of rewriting it.
-        std::fs::write(&v, "sentinel").unwrap();
+        // Derived once: a second call reuses a VALID cached file rather than
+        // rewriting it. (A malformed one is rebuilt — see the stale-cache test.)
+        std::fs::write(&v, "sentinel\t0\n").unwrap();
         assert_eq!(bpe_vocab(&tokens).unwrap(), v);
-        assert_eq!(std::fs::read_to_string(&v).unwrap(), "sentinel");
+        assert_eq!(std::fs::read_to_string(&v).unwrap(), "sentinel\t0\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -368,6 +423,70 @@ mod tests {
         std::fs::write(&tokens, "<unk> 0\n\u{2581} 1\n").unwrap();
         let v = bpe_vocab(&tokens).unwrap();
         assert_eq!(std::fs::read_to_string(&v).unwrap(), "<unk>\t0\n\u{2581}\t-1\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A duplicate key is what makes ssentencepiece's double-array build fail,
+    /// and that failure is _Exit() — so it has to be caught on this side.
+    #[test]
+    fn duplicate_pieces_fail_closed() {
+        let dir = scratch("dictum-bpe-vocab-dup");
+        let tokens = dir.join("tokens.txt");
+        std::fs::write(&tokens, "<unk> 0\ndup 1\ndup 2\n").unwrap();
+        assert!(bpe_vocab(&tokens).is_none());
+        assert!(!dir.join("bpe.vocab").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A piece containing a space yields three items on its line, which is the
+    /// other rejection the shipped library can raise here.
+    #[test]
+    fn a_piece_containing_a_space_fails_closed() {
+        let dir = scratch("dictum-bpe-vocab-3col");
+        let tokens = dir.join("tokens.txt");
+        std::fs::write(&tokens, "<unk> 0\ntwo words 1\n").unwrap();
+        assert!(bpe_vocab(&tokens).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The cached file is re-checked, not trusted by path: a truncated vocab left
+    /// by an older build would otherwise be handed to sherpa forever, and the
+    /// user has no idea the file exists.
+    #[test]
+    fn a_malformed_cached_vocab_is_rebuilt() {
+        let dir = scratch("dictum-bpe-vocab-stale");
+        let tokens = dir.join("tokens.txt");
+        std::fs::write(&tokens, "<unk> 0\nok 1\n").unwrap();
+        std::fs::write(dir.join("bpe.vocab"), "truncated-halfway-throu").unwrap();
+
+        let v = bpe_vocab(&tokens).expect("should rebuild rather than reuse");
+        assert_eq!(std::fs::read_to_string(&v).unwrap(), "<unk>\t0\nok\t-1\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn well_formed_accepts_only_two_items_per_line() {
+        assert!(well_formed("a\t0\nb\t-1\n"));
+        assert!(!well_formed(""), "an empty vocab is not usable");
+        assert!(!well_formed("a\t0\na\t-1\n"), "duplicate key");
+        assert!(!well_formed("a b\t0\n"), "three items");
+        assert!(!well_formed("a\n"), "one item");
+        assert!(!well_formed("a\tnotanumber\n"), "unparseable score");
+    }
+
+    #[test]
+    fn no_temp_file_is_left_behind() {
+        let dir = scratch("dictum-bpe-vocab-tmp");
+        let tokens = dir.join("tokens.txt");
+        std::fs::write(&tokens, "<unk> 0\nok 1\n").unwrap();
+        bpe_vocab(&tokens).expect("derivation should succeed");
+        let leftovers: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|n| n.contains("tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "left {leftovers:?} behind");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
