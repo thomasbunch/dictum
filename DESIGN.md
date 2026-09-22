@@ -115,7 +115,10 @@ reformatter mode, reformatter compute, retention). One 1px `--ink` frame around 
 cells divided by 1px `--hair`, cell type Mono 10 caps, tracking .04em, min-width 56px,
 padding 6px 12px. Unselected `--ink2`; hover `--ink` on `--register`; **selected prints
 inverted: `--paper` on `--ink`**. Radio semantics (`role="radiogroup"` + `role="radio"`,
-arrow keys move and select, wrapping). The selected cell's caption prints under the strip
+arrow keys move and select, wrapping) with a **roving tabindex** — the whole strip is one
+tab stop (§8), `tabindex="0"` on the selected cell and `-1` on the rest. Arrow traversal
+selects as it moves, so it persists through the debounced `persist()`, never `persistNow()`.
+The selected cell's caption prints under the strip
 (Value-sm, `--ink2`) — one line at a time, never one caption per option. Focus outline sits
 inside the cell (`outline-offset: -3px`) and turns `--paper` on the selected cell. Square
 radio inputs are **retired**: they read as checkboxes and their captions stacked into walls.
@@ -156,7 +159,10 @@ header band.
   two, and the footer already carries the third on every view.
 - Counters (Value-lg + Microlabel captions): **WORDS TODAY · ON THE TAPE** (total kept
   lines). PRINTED duplicated the line count; DAYS RUNNING counted distinct days in retained
-  history, so retention capped it and it read 0 — both cut.
+  history, so retention capped it and it read 0 — both cut. **Counters describe the whole
+  tape, never the active search**, so they read an unfiltered snapshot, not the filtered
+  feed. They repaint whenever the tape changes — including STRIKE and UNDO, which the
+  backend signals nothing for.
 - Right: keycap chips of current hotkey + caption `HOLD TO SPEAK` (caption follows mode:
   TOGGLE → `TAP TO SPEAK`, BOTH → `TAP OR HOLD TO SPEAK`). Clicking the chips starts a test
   dictation targeted at a scratch line in the masthead. **Keycaps are the "prominent start

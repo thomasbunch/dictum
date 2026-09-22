@@ -23,6 +23,9 @@ export interface Ctx {
   gpu: GpuInfoDto | null;
   devices: string[];
   records: HistoryRecord[];
+  /** Unfiltered newest-first snapshot — the masthead counters describe the whole
+   * tape, never the active search (§5.1). Capped at 500 like any history list. */
+  statRecords: HistoryRecord[];
   totalLines: number;
   /** Newest record id after a live injection — its row ink-dries (M6). */
   freshId: number | null;
@@ -145,6 +148,7 @@ const ctx: Ctx = {
   gpu: null,
   devices: [],
   records: [],
+  statRecords: [],
   totalLines: 0,
   freshId: null,
   version: "",
@@ -158,8 +162,16 @@ const ctx: Ctx = {
   },
   async reloadHistory(search: string | null) {
     searchQuery = search;
-    ctx.records = await api.historyList(search);
-    ctx.totalLines = await api.historyCount();
+    // The counters describe the whole tape, so a live search fetches the
+    // unfiltered list alongside the filtered one (both local, both capped 500).
+    const [records, total, all] = await Promise.all([
+      api.historyList(search),
+      api.historyCount(),
+      search === null ? Promise.resolve(null) : api.historyList(null),
+    ]);
+    ctx.records = records;
+    ctx.totalLines = total;
+    ctx.statRecords = all ?? records;
   },
   renderMasthead,
   renderView,
@@ -203,7 +215,7 @@ function isToday(ts: number): boolean {
 }
 
 function buildCounters(): HTMLElement {
-  const today = ctx.records.filter((r) => isToday(r.ts));
+  const today = ctx.statRecords.filter((r) => isToday(r.ts));
   const words = today.reduce((n, r) => n + r.text.trim().split(/\s+/).filter(Boolean).length, 0);
   const counter = (value: string, cap: string) =>
     h("div", { class: "counter" }, [

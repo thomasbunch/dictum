@@ -73,7 +73,7 @@ let config: Config = {
     "mstsc.exe": { backend: "sendInputUnicode", pasteShortcut: null, chunkDelayMs: null },
     "windowsterminal.exe": { backend: null, pasteShortcut: "ctrlShiftV", chunkDelayMs: null },
   },
-  projectRoots: ["C:\\Users\\honorr\\Documents\\DEV\\dictum"],
+  projectRoots: ["C:\\Projects\\dictum"],
   modelId: "parakeet-tdt-0.6b-v2-int8",
   reformat: "on",
   reformatDevice: "gpu",

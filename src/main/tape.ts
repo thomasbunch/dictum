@@ -106,8 +106,13 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
     clearInterval(undoTimer); // a second strike finalizes the previous bar
     void api.historyDelete(rec.id).then(() => {
       ctx.records = ctx.records.filter((r) => r.id !== rec.id);
+      ctx.statRecords = ctx.statRecords.filter((r) => r.id !== rec.id);
       ctx.totalLines = Math.max(0, ctx.totalLines - 1);
       updateMeta();
+      // The counters live in the masthead now, and the backend emits nothing on
+      // delete — repaint here or ON THE TAPE goes stale until the view changes.
+      ctx.renderMasthead();
+      feedWrap.classList.toggle("blank", ctx.records.length === 0);
       let left = 6;
       const count = h("span", { class: "value count" }, `${left} S`);
       const bar = h("div", { class: "undo-bar", role: "status" }, [
@@ -129,7 +134,10 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
         count.textContent = `${left} S`;
         if (left <= 0) {
           clearInterval(undoTimer);
-          bar.remove(); // removal is instant (§5.2)
+          // Instant removal (§5.2) via a feed rebuild, which also clears a day
+          // rule left with nothing under it, restores the blank state, and drops
+          // any earlier bar a second strike froze. Keeps the expanded row.
+          renderFeed();
         }
       }, 1000);
     });
@@ -235,6 +243,7 @@ export function renderTape(ctx: Ctx, host: HTMLElement): void {
   async function reload() {
     await ctx.reloadHistory(query || null);
     expandedId = null;
+    ctx.renderMasthead(); // UNDO restores a line — the counters have to follow
     renderFeed();
   }
 

@@ -39,7 +39,13 @@ function segmented<T extends string>(
   const desc = h("div", { class: "value-sm seg-desc" });
   const btns: HTMLButtonElement[] = [];
   const select = (v: T) => {
-    btns.forEach((b, i) => b.setAttribute("aria-checked", String(options[i][0] === v)));
+    btns.forEach((b, i) => {
+      const on = options[i][0] === v;
+      b.setAttribute("aria-checked", String(on));
+      // Roving tabindex: a radiogroup is ONE tab stop (§8) — arrows move inside
+      // it. Native radios get this free; these buttons have to be told.
+      b.tabIndex = on ? 0 : -1;
+    });
     const d = options.find((o) => o[0] === v)?.[2];
     desc.textContent = d ?? "";
     desc.hidden = !d;
@@ -319,16 +325,18 @@ const REFORMAT_DEVICES: [ReformatDevice, string, string][] = [
 
 function buildReformatSection(ctx: Ctx): HTMLElement {
   // Mode: AUTO / ON / OFF — same segmented grammar as the hotkey mode.
+  // Debounced: arrow traversal fires onChange per step, and a device change
+  // drops and reloads the LLM — only the value the user lands on should persist.
   const mode = segmented<ReformatMode>("Reformatter mode", REFORMAT_MODES, ctx.config.reformat, (v) => {
     ctx.config.reformat = v;
-    ctx.persistNow();
+    ctx.persist();
   });
 
   // Device: AUTO / GPU / CPU — where the reformatter runs. GPU is faster; CPU
   // spares the GPU (e.g. on battery). Only bites on a Vulkan build.
   const device = segmented<ReformatDevice>("Reformatter device", REFORMAT_DEVICES, ctx.config.reformatDevice, (v) => {
     ctx.config.reformatDevice = v;
-    ctx.persistNow();
+    ctx.persist();
   });
 
   // One-line AUTO explanation: which SKU the GPU gate picked on this machine.
@@ -417,7 +425,7 @@ function buildPrivacySection(ctx: Ctx): HTMLElement {
     ctx.config.retention,
     (r) => {
       ctx.config.retention = r;
-      ctx.persistNow();
+      ctx.persist(); // debounced: crossing the strip by arrow is one write
       ctx.updateFooter();
     },
   );
