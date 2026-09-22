@@ -70,6 +70,12 @@ pub trait Effects {
     /// Config switched the active model SKU — the ASR worker drops the old
     /// recognizer and future loads use the new id. Default no-op for mocks.
     fn set_model(&mut self, _id: String) {}
+    /// Turn ASR contextual biasing on/off. Drops and reloads the recognizer —
+    /// `decoding_method` is fixed when it is constructed.
+    fn set_asr_biasing(&mut self, _on: bool) {}
+    /// Rebuild and push the hotword list (built-in terms + the user's vocabulary
+    /// + the repo symbol harvest). Cheap: it rides on each stream, no reload.
+    fn refresh_hotwords(&mut self) {}
     /// A transcription is now held for PasteLast — the tray menu item enables.
     fn set_paste_available(&mut self, _on: bool) {}
 
@@ -737,6 +743,23 @@ impl Coordinator {
                 if c.reformat_device != self.cfg.reformat_device {
                     fx.set_reformat_device(c.reformat_device.clone());
                 }
+                // Contextual biasing toggle. The recognizer bakes decoding_method
+                // in at construction, so the worker drops and reloads it — which
+                // means warming it back up follows the same rule as a SKU switch,
+                // or the next take pays the load.
+                if c.asr_biasing != self.cfg.asr_biasing {
+                    fx.set_asr_biasing(c.asr_biasing);
+                    if !c.unload_on_idle {
+                        fx.ensure_model();
+                    }
+                }
+                // The built-in half of the hotword list is static and the repo
+                // half is refreshed by the session walk, so the user's vocabulary
+                // is the only part a config change can move. No reload — the list
+                // rides on the next stream.
+                if c.vocabulary != self.cfg.vocabulary {
+                    fx.refresh_hotwords();
+                }
                 // Streaming preview toggle: (dis)arm the audio tee + resize the
                 // overlay in lockstep, and warm/drop the preview model (same
                 // ensure-on-enable / unload-on-disable pattern as reformat).
@@ -929,6 +952,8 @@ mod tests {
         EnsureStreamModel,
         UnloadStreamModel,
         SetStreamPreview(bool),
+        SetAsrBiasing(bool),
+        RefreshHotwords,
     }
 
     struct Mock {
@@ -1065,6 +1090,12 @@ mod tests {
         }
         fn set_model(&mut self, id: String) {
             self.calls.push(Call::SetModel(id));
+        }
+        fn set_asr_biasing(&mut self, on: bool) {
+            self.calls.push(Call::SetAsrBiasing(on));
+        }
+        fn refresh_hotwords(&mut self) {
+            self.calls.push(Call::RefreshHotwords);
         }
         fn reformat(&mut self, det: String, generation: u64) {
             self.calls.push(Call::Reformat { gen: generation, det });
@@ -1552,6 +1583,62 @@ mod tests {
         c.handle(CoordMsg::ConfigChanged(new_cfg), &mut fx);
         assert!(fx.has(&Call::SetModel("parakeet-tdt-0.6b-v3-int8".into())));
         assert!(!fx.has(&Call::EnsureModel)); // lazy-loads on the next take
+    }
+
+    #[test]
+    fn biasing_toggle_reloads_the_recognizer() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut off = cfg(HotkeyMode::Hold);
+        off.asr_biasing = !c.cfg.asr_biasing;
+        c.handle(CoordMsg::ConfigChanged(off.clone()), &mut fx);
+        assert!(fx.has(&Call::SetAsrBiasing(off.asr_biasing)));
+        // decoding_method is fixed at construction, so the drop must be followed
+        // by a warm-up or the next take pays a cold load.
+        assert!(fx.has(&Call::EnsureModel));
+
+        // Same config again: no redundant reload.
+        fx.calls.clear();
+        c.handle(CoordMsg::ConfigChanged(off), &mut fx);
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::SetAsrBiasing(_))));
+    }
+
+    #[test]
+    fn biasing_toggle_with_unload_on_idle_stays_cold() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut next = cfg(HotkeyMode::Hold);
+        next.asr_biasing = !c.cfg.asr_biasing;
+        next.unload_on_idle = true;
+        c.handle(CoordMsg::ConfigChanged(next), &mut fx);
+        assert!(fx.has(&Call::SetAsrBiasing(false)) || fx.has(&Call::SetAsrBiasing(true)));
+        assert!(!fx.has(&Call::EnsureModel));
+    }
+
+    #[test]
+    fn vocabulary_change_refreshes_hotwords_without_a_reload() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut next = cfg(HotkeyMode::Hold);
+        next.vocabulary = vec!["Dictum".into()];
+        c.handle(CoordMsg::ConfigChanged(next), &mut fx);
+        assert!(fx.has(&Call::RefreshHotwords));
+        assert!(!fx.calls.iter().any(|x| matches!(x, Call::SetAsrBiasing(_))));
+        assert!(!fx.has(&Call::EnsureModel));
+    }
+
+    #[test]
+    fn unrelated_config_change_leaves_hotwords_alone() {
+        let base = Instant::now();
+        let mut fx = Mock::new(base);
+        let mut c = Coordinator::new(cfg(HotkeyMode::Hold));
+        let mut next = cfg(HotkeyMode::Hold);
+        next.audio_cues = !next.audio_cues;
+        c.handle(CoordMsg::ConfigChanged(next), &mut fx);
+        assert!(!fx.has(&Call::RefreshHotwords));
     }
 
     #[test]

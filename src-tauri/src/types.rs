@@ -199,6 +199,20 @@ pub struct Config {
     /// Live streaming partial preview in the HUD (companion Nemotron model).
     /// Never affects injected text — Parakeet stays authoritative. Default off.
     pub streaming_preview: bool,
+    /// Built-in coding vocabulary (terms::TERMS) applied as replacement rules.
+    /// Unlike the user's own rules these never enter the ledger, so this is the
+    /// off switch. Default ON: a dictation app whose pitch is agent-ready text
+    /// should spell `nginx` out of the box, not after the user finds a button.
+    pub coding_terms: bool,
+    /// ASR contextual biasing — feed the built-in terms, the user's vocabulary
+    /// and the repo symbol harvest to the recogniser as hotwords. Requires
+    /// modified_beam_search in place of greedy decoding. Default ON.
+    ///
+    /// The escape hatch is real, not ceremonial: k2-fsa/sherpa-onnx#3267 reports
+    /// modified_beam_search dropping roughly 1-in-5 takes on TDT models and is
+    /// still open. A dropped take surfaces as an empty transcript (the HUD
+    /// cancels, nothing is injected). If a user hits that, this is the switch.
+    pub asr_biasing: bool,
 }
 
 impl Default for Config {
@@ -222,6 +236,8 @@ impl Default for Config {
             reformat: "auto".into(),
             reformat_device: "auto".into(),
             streaming_preview: false,
+            coding_terms: true,
+            asr_biasing: true,
         }
     }
 }

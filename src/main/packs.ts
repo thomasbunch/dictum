@@ -1,4 +1,4 @@
-// Preset replacement packs for WORDS (§5.3). Data + a client-side merge. These
+// Preset replacement pack for WORDS (§5.3). Data + a client-side merge. These
 // wire as REPLACEMENT RULES, not vocabulary: the highest-value entries are
 // spelling/multi-word transforms ("get hub" -> "GitHub") that casing-only
 // vocabulary cannot express. Every entry is visible/editable/removable in the
@@ -30,30 +30,6 @@ export const CODE_SYMBOLS: Replacement[] = [
 
 // heard -> printed jargon. Wired as REPLACEMENT RULES. No ordering hazards:
 // word boundaries keep "http" off "https", etc.
-export const CODING_TERMS: Replacement[] = [
-  // spelling / multi-word (only a rule can do these)
-  { heard: "get hub", printed: "GitHub" }, { heard: "git hub", printed: "GitHub" },
-  { heard: "kube control", printed: "kubectl" }, { heard: "py test", printed: "pytest" },
-  { heard: "engine x", printed: "nginx" }, { heard: "node js", printed: "Node.js" },
-  { heard: "next js", printed: "Next.js" }, { heard: "nest js", printed: "NestJS" },
-  { heard: "type script", printed: "TypeScript" }, { heard: "java script", printed: "JavaScript" },
-  { heard: "react js", printed: "React" }, { heard: "mongo db", printed: "MongoDB" },
-  { heard: "web socket", printed: "WebSocket" }, { heard: "local host", printed: "localhost" },
-  { heard: "post gres", printed: "Postgres" }, { heard: "c plus plus", printed: "C++" },
-  { heard: "c sharp", printed: "C#" }, { heard: "dot net", printed: ".NET" },
-  { heard: "golang", printed: "Go" },
-  // casing (safe non-English tokens; work identically as rules)
-  { heard: "github", printed: "GitHub" }, { heard: "gitlab", printed: "GitLab" },
-  { heard: "typescript", printed: "TypeScript" }, { heard: "javascript", printed: "JavaScript" },
-  { heard: "json", printed: "JSON" }, { heard: "yaml", printed: "YAML" },
-  { heard: "graphql", printed: "GraphQL" }, { heard: "oauth", printed: "OAuth" },
-  { heard: "sqlite", printed: "SQLite" }, { heard: "postgres", printed: "Postgres" },
-  { heard: "kubernetes", printed: "Kubernetes" }, { heard: "redis", printed: "Redis" },
-  { heard: "api", printed: "API" }, { heard: "url", printed: "URL" },
-  { heard: "html", printed: "HTML" }, { heard: "css", printed: "CSS" },
-  { heard: "http", printed: "HTTP" }, { heard: "https", printed: "HTTPS" },
-  { heard: "sql", printed: "SQL" },
-]; // 38 entries
 
 /** Append pack entries missing from `existing` (dedupe by heard, trimmed +
  *  lower-cased). Mutates `existing`; returns count added. Re-adding = no-op;

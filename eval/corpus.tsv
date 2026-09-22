@@ -1,0 +1,156 @@
+# Dictum coding-term eval corpus. Tab-separated: id, split, keywords, text.
+#
+# The text column is BOTH the reference transcript and the prompt you read aloud.
+# Read it naturally, as if dictating to a coding agent - do not over-enunciate,
+# and do not read the punctuation aloud. Record with:
+#   cargo test --release -- --ignored --nocapture eval_record
+#
+# The keywords column lists terms that must appear in the FINAL injected text,
+# spelled and cased exactly as written here. Empty for prose controls.
+#
+# splits:
+#   lib    out-of-repo library / tool / API vocabulary - the enumerable set that a
+#          term table and a hotword list can own outright.
+#   repo   an identifier from THIS repo, reachable through the spoken symbol cue.
+#          The text carries the cue word "symbol" because that is how the feature
+#          is actually invoked; with no cue it is inert by design.
+#   gated  an identifier the precision gating deliberately refuses to glue back
+#          together. The keyword is the SPOKEN form, which must survive untouched -
+#          a "correction" here would be the bug.
+#   prose  no target terms at all. Scores corruption rather than accuracy: the
+#          pipeline must not change what the recognizer heard. Carries every spoken
+#          form demoted out of the rule table for colliding with ordinary English.
+id	split	keywords	text
+lib001	lib	tokio	the retry loop should use a tokio interval instead of sleeping in a thread
+lib002	lib	tokio,async	we need to spawn that on the tokio runtime and make the handler async
+lib003	lib	serde	add a serde derive to that struct so it round trips through the config file
+lib004	lib	serde,JSON	serde is dropping the field because the JSON key does not match
+lib005	lib	nginx	put nginx in front of it and terminate the encryption there
+lib006	lib	nginx,HTTP	nginx is returning a five oh two on every HTTP request right now
+lib007	lib	kubectl	run kubectl get pods and tell me which one is crash looping
+lib008	lib	kubectl,Kubernetes	kubectl cannot reach the Kubernetes control plane from this network
+lib009	lib	pnpm	switch the lockfile over to pnpm because the other one hoists the wrong version
+lib010	lib	pnpm	pnpm install is failing on the postinstall script for that package
+lib011	lib	kwargs	pass the extra options through as kwargs instead of a positional argument
+lib012	lib	kwargs	the signature takes kwargs so we can add fields without breaking callers
+lib013	lib	SIGKILL,SIGTERM	the worker is ignoring SIGTERM so the supervisor ends up sending SIGKILL
+lib014	lib	SIGKILL	nothing gets flushed when it dies from SIGKILL so we lose the last batch
+lib015	lib	OAuth	the OAuth callback is dropping the state parameter on the redirect
+lib016	lib	OAuth,JWT	after the OAuth exchange we put the JWT in a cookie that scripts cannot read
+lib017	lib	stdout,stderr	write the progress to stderr and keep stdout clean for the piped output
+lib018	lib	stdout,stderr	the test harness is mixing stdout and stderr so the log order is wrong
+lib019	lib	async,await	make that function async and await the fetch instead of blocking the thread
+lib020	lib	await	we forgot to await the promise so the error never surfaced anywhere
+lib021	lib	pytest	pytest is collecting that fixture twice because of the conftest import
+lib022	lib	pytest	run pytest with the keyword filter and skip the slow integration tests
+lib023	lib	GitHub	open a GitHub issue for it and link the failing run
+lib024	lib	GitHub	the GitHub action is timing out while it restores the cache
+lib025	lib	GitLab	we mirror the repository to GitLab for the internal runners
+lib026	lib	TypeScript	the TypeScript compiler is complaining about a missing return type
+lib027	lib	TypeScript,JavaScript	we are moving the JavaScript modules over to TypeScript one folder at a time
+lib028	lib	Node.js	the Node.js version in the container is older than the one we build against
+lib029	lib	Next.js	Next.js is prerendering that page so the client hook never runs
+lib030	lib	localhost	it works against localhost but fails as soon as we deploy it
+lib031	lib	WebSocket	the WebSocket reconnects but it never resubscribes to the channel
+lib032	lib	Postgres	Postgres is choosing a sequential scan because the statistics are stale
+lib033	lib	Postgres,SQL	write the SQL by hand because the query builder emits terrible Postgres plans
+lib034	lib	MongoDB	MongoDB is fine for the event log but not for the ledger
+lib035	lib	SQLite	use SQLite for the local cache and skip the migration machinery
+lib036	lib	Redis	Redis is evicting the session keys long before they expire
+lib037	lib	YAML	the YAML anchors make that config unreadable so flatten the whole thing
+lib038	lib	YAML,JSON	convert the YAML to JSON before you hand it to the parser
+lib039	lib	GraphQL	the GraphQL resolver is doing a query per edge and it does not scale
+lib040	lib	API,URL	the API is returning a relative URL and the client cannot resolve it
+lib041	lib	HTTPS	force HTTPS on every route and drop the plaintext listener
+lib042	lib	HTML,CSS	the HTML renders but the CSS grid collapses on a narrow window
+lib043	lib	Docker	rebuild the Docker image because the base layer moved underneath us
+lib044	lib	Dockerfile	the Dockerfile copies the whole tree so every change busts the cache
+lib045	lib	Terraform	Terraform wants to destroy the bucket and recreate it which we cannot allow
+lib046	lib	systemd	the systemd unit restarts too fast and hits the rate limit
+lib047	lib	crontab	put it in the crontab and have it log to a dated file
+lib048	lib	chmod	chmod the deploy key to six hundred or it refuses to use it
+lib049	lib	grep,regex	grep for it with a regex that allows an optional trailing slash
+lib050	lib	eslint	eslint and prettier are fighting over the trailing comma rule
+lib051	lib	webpack	the webpack config has a custom loader with no equivalent in the new bundler
+lib052	lib	tsconfig	the tsconfig paths are not being honoured by the bundler at all
+lib053	lib	numpy	numpy is upcasting to double precision and blowing the memory budget
+lib054	lib	pydantic	the pydantic model rejects the payload because that field is optional upstream
+lib055	lib	Django	the Django migration is not reversible so we cannot roll it back
+lib056	lib	FastAPI	FastAPI generates the schema from the type hints so keep them accurate
+lib057	lib	argparse	argparse is swallowing the negative number as if it were a flag
+lib058	lib	virtualenv	the virtualenv has a stale version pinned in it so recreate the whole thing
+lib059	lib	ruff	ruff flags that import as unused but the side effect actually matters
+lib060	lib	CMake	the CMake generator is defaulting to the wrong toolchain on this machine
+lib061	lib	LLVM	the build needs LLVM on the path before the bindings will generate
+lib062	lib	Vulkan	the Vulkan build works but the shader compiler blows the path limit
+lib063	lib	ONNX	export it to ONNX so the runtime can load it without the framework
+lib064	lib	CUDA	CUDA is not available in that container so it falls back to the processor
+lib065	lib	gRPC	the gRPC deadline is shorter than the upstream timeout so it always cancels
+lib066	lib	CORS	the CORS preflight is failing because that header is not on the allow list
+lib067	lib	UUID	generate a UUID for the take and use it as the history key
+lib068	lib	rebase	rebase onto the main branch and squash the fixup commits before you push
+lib069	lib	monorepo	the monorepo tooling rebuilds every package when only one of them changed
+lib070	lib	PowerShell	the PowerShell script writes a byte order mark which breaks the parser
+lib071	lib	WSL	the training has to run in WSL because there is no native build
+lib072	lib	stdin	read the payload from stdin so we can pipe it in from another process
+lib073	lib	axum,reqwest	the axum handler calls out through reqwest and never sets a timeout
+lib074	lib	clippy	clippy wants that collapsed into a single expression and i disagree with it
+lib075	lib	cargo	cargo is rebuilding the native dependency every time the environment changes
+repo001	repo	coordinator	the symbol coordinator should reset the session before the next take
+repo002	repo	Segmenter	ask the symbol segmenter to flush whatever speech is still open
+repo003	repo	guardrail	the symbol guardrail tripped on that reformat so we fell back to the plain text
+repo004	repo	zipformer	the symbol zipformer encoder is the slow part of that whole decode
+repo005	repo	reformat	the symbol reformat worker holds the model on its own thread
+repo006	repo	filetag	the symbol filetag index rebuilds in the background at every session start
+repo007	repo	hotkey	the symbol hotkey manager keeps missing the escape rearm
+repo008	repo	overlay	the symbol overlay window stays click through until the lane appears
+repo009	repo	snippets	the symbol snippets expand before the file tag pass ever runs
+repo010	repo	vocabulary	the symbol vocabulary only fixes casing and never changes the spelling
+repo011	repo	replacements	the symbol replacements loop runs the rules in array order
+repo012	repo	inject	the symbol inject path falls back to the clipboard when the target is elevated
+repo013	repo	resample	the symbol resample step downmixes to mono before it changes the rate
+repo014	repo	dispatch	the symbol dispatch queue is stuck waiting on the tail
+repo015	repo	persist	we should symbol persist the history record even when the take is abandoned
+repo016	repo	probe	the symbol probe runs once at startup and decides which model to use
+repo017	repo	earcons	the symbol earcons play on start and stop but never on a discard
+repo018	repo	hotwords	the symbol hotwords list is rebuilt whenever the walk finishes
+repo019	repo	generation	the symbol generation tag lets us drop a stale decode after a cancel
+repo020	repo	transcripts	the symbol transcripts are kept for seven days by default
+gated001	gated	get user config	the get user config helper reads the file twice and we should cache it
+gated002	gated	handle download	the handle download branch never checks the content length
+gated003	gated	build index	the build index walk skips anything the ignore file excludes
+gated004	gated	hud state	the hud state machine hides the lane whenever there is an error
+gated005	gated	file watcher	we do not have a file watcher so the index is rebuilt per session
+gated006	gated	try finalize	try finalize only runs once the tail is in and the decodes have drained
+gated007	gated	apply symbols	apply symbols runs last so the file tag pass owns the at grammar
+gated008	gated	start capture	start capture refreshes the index while the take is still recording
+prose001	prose		i flew to tokyo last spring and the trip was much too short
+prose002	prose		the paper was mostly about quarks and gluons and i understood none of it
+prose003	prose		this error is confusing and i cannot reproduce it on my own machine
+prose004	prose		i ate my pie at the desk and went straight back to work
+prose005	prose		jot it down before you forget the whole thing again
+prose006	prose		the ring had a small onyx set into the middle of it
+prose007	prose		throw the whole draft in the bit bucket and start again tomorrow
+prose008	prose		that is the standard in this industry and nobody questions it any more
+prose009	prose		did you see make fail again on the shared runner this morning
+prose010	prose		the engine ran hot on the way up the hill and the pipe leaked
+prose011	prose		plot the engine x-axis against time and see where it flattens out
+prose012	prose		go and check the repo for me before the meeting starts
+prose013	prose		she underscored the point twice and nobody was listening to her
+prose014	prose		the caret moved to the end of the line when i pressed the key
+prose015	prose		we should talk about the design of the state machine before we build it
+prose016	prose		the main thing i want is for the test to run in under a minute
+prose017	prose		i have no strong feelings about the colour of the button
+prose018	prose		can you check whether the meeting moved to thursday afternoon
+prose019	prose		the build is failing but i think it is the network and not the code
+prose020	prose		remind me to send the invoice on friday before i leave
+prose021	prose		the document says one thing and the code says another and i trust the code
+prose022	prose		we agreed to ship it on monday and then nobody did anything at all
+prose023	prose		it took about twenty minutes which is a lot longer than i expected
+prose024	prose		the customer wants the export to include a date range picker
+prose025	prose		i am not convinced that any of this is worth doing right now
+prose026	prose		my laptop fan spins up every single time i open that page
+prose027	prose		let us keep the scope small and see whether anyone actually uses it
+prose028	prose		the second half of the recording is much quieter than the first
+prose029	prose		he said he would look at it and then went on holiday for a fortnight
+prose030	prose		please write that up as a short note rather than a whole document

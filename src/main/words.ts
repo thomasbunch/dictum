@@ -3,7 +3,7 @@
 import { api, type Replacement } from "../bindings";
 import { h } from "../shared";
 import type { Ctx } from "./main";
-import { CODE_SYMBOLS, CODING_TERMS, addPack } from "./packs";
+import { CODE_SYMBOLS, addPack } from "./packs";
 
 const VOCAB_MAX = 50;
 
@@ -201,9 +201,8 @@ function buildReplacements(ctx: Ctx): HTMLElement {
       ]),
     ]),
     h("div", { class: "repl-links" }, [
-      h("span", { class: "microlabel" }, "PACKS"),
+      h("span", { class: "microlabel" }, "PACK"),
       h("button", { class: "action", onclick: () => addAndRender(CODE_SYMBOLS, "SYMBOLS") }, "CODE SYMBOLS"),
-      h("button", { class: "action", onclick: () => addAndRender(CODING_TERMS, "TERMS") }, "CODING TERMS"),
       packNote,
     ]),
     fileInput,

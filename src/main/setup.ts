@@ -275,6 +275,26 @@ function buildModelSection(ctx: Ctx): HTMLElement {
       ctx.config.unloadOnIdle = on;
       ctx.persistNow();
     }),
+    toggleRow(
+      "BIAS THE EAR",
+      "TUNES THE RECOGNIZER TOWARD CODING TERMS, YOUR WORDS, AND YOUR REPO. TURN OFF IF TAKES GO MISSING.",
+      ctx.config.asrBiasing,
+      false,
+      (on) => {
+        ctx.config.asrBiasing = on;
+        ctx.persistNow();
+      },
+    ),
+    toggleRow(
+      "BUILT-IN CODING TERMS",
+      "SPELLS NGINX, KUBECTL, GITHUB AND ~60 MORE. YOUR OWN RULES OVERRIDE THEM.",
+      ctx.config.codingTerms,
+      false,
+      (on) => {
+        ctx.config.codingTerms = on;
+        ctx.persistNow();
+      },
+    ),
   ]);
   return sect("MODEL", "THE ONLY DOWNLOADS DICTUM WILL EVER MAKE.", body);
 }

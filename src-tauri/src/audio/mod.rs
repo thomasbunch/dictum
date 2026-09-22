@@ -2,9 +2,9 @@
 //! amplitude bars) -> CoordMsg. One persistent worker thread owns the cpal stream (`!Send`)
 //! and all DSP. See PLAN.md §3 and CONTRACTS.md.
 
-mod capture;
+pub(crate) mod capture;
 mod cues;
-mod resample;
+pub(crate) mod resample;
 mod vad;
 
 pub use capture::list_input_devices;

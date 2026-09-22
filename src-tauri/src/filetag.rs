@@ -282,6 +282,40 @@ pub struct Index {
 }
 
 impl Index {
+    /// Harvested repo symbols worth biasing the recogniser toward.
+    ///
+    /// Deliberately a small subset. A hotword boosts a spelling the acoustic
+    /// model was already considering, so it only helps for an identifier the
+    /// user SPEAKS AS ONE WORD — `zipformer`, `axum`, `serde`. A multi-part
+    /// identifier is spoken as its parts ("hud state" for `HudState`), and the
+    /// model emits those parts correctly already; biasing toward the glued
+    /// spelling asks for a token speech never produces, while biasing toward the
+    /// parts would boost ordinary English. Those are `apply_symbols`' job, on the
+    /// text side, where the cue supplies the evidence biasing can't.
+    ///
+    /// So: single-part, distinctive, and long enough to be worth a graph node.
+    pub fn hotwords(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for root in &self.roots {
+            for spellings in root.by_symbol.values() {
+                // Ambiguous keys (two spellings) are exactly what the text-side
+                // pass refuses to guess at; don't guess here either.
+                let [id] = spellings.as_slice() else { continue };
+                let parts = id_parts(id);
+                let [part] = parts.as_slice() else { continue };
+                if part.len() >= MIN_HOTWORD && !is_common(part) {
+                    out.push(id.clone());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// Shorter than this and a hotword boosts far more than it corrects.
+const MIN_HOTWORD: usize = 4;
+
+impl Index {
     /// Walk each root (gitignore-aware, hidden files skipped) and index every
     /// file name. A repo walk is ms-scale; callers rebuild per session.
     pub fn build(roots: &[String]) -> Index {
@@ -1189,6 +1223,29 @@ mod tests {
     }
 
     #[test]
+    fn hotwords_are_single_word_distinctive_symbols_only() {
+        let i = idx_syms(
+            "dictum",
+            &["src/lib.rs"],
+            &["zipformer", "HudState", "try_finalize", "buf", "config", "Segmenter"],
+        );
+        let mut hw = i.hotwords();
+        hw.sort();
+        // zipformer/segmenter are spoken as one word and are misspellable.
+        // HudState and try_finalize are spoken as their parts — text-side work.
+        // "buf" is under MIN_HOTWORD; "config" is a common word.
+        assert_eq!(hw, vec!["Segmenter".to_string(), "zipformer".to_string()]);
+    }
+
+    #[test]
+    fn ambiguous_symbol_spellings_are_never_biased() {
+        // Two spellings under one normalized key: the text pass returns nothing
+        // rather than guess, and biasing must not guess either.
+        let i = idx_syms("dictum", &["src/lib.rs"], &["zipformer", "ZipFormer"]);
+        assert!(i.hotwords().is_empty());
+    }
+
+    #[test]
     fn apply_symbols_fires_on_cue() {
         let i = idx_syms("dictum", &[], &["parse_zipformer", "HudState", "zipformer"]);
         assert_eq!(
@@ -1404,17 +1461,20 @@ mod tests {
     // the invariant. A single diff would be a critical prose-corruption bug.
     #[test]
     fn cardinal_sin_cueless_repo_vocab_is_identity() {
-        // Canonicalize so the root's folder name is real ("Dictum"); a path
-        // ending in ".." has no file_name and would go inert — passing identity
-        // for the wrong reason instead of exercising the live matching loop.
-        let root = std::fs::canonicalize(format!("{}/..", env!("CARGO_MANIFEST_DIR")))
-            .unwrap()
-            .to_string_lossy()
-            .into_owned();
+        // Canonicalize so the root has a real folder name; a path ending in ".."
+        // has no file_name and would go inert — passing identity for the wrong
+        // reason instead of exercising the live matching loop.
+        let root_path = std::fs::canonicalize(format!("{}/..", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        // Take the folder name from the checkout rather than hardcoding "Dictum":
+        // a worktree or a differently-named clone would otherwise make the root
+        // inert and trip the liveness assert below for an environmental reason.
+        let folder = root_path.file_name().unwrap().to_string_lossy().into_owned();
+        let root = root_path.to_string_lossy().into_owned();
         let i = Index::build(&[root]);
         let total: usize = i.roots.iter().map(|r| r.by_symbol.len()).sum();
         assert!(total > 50, "expected a rich harvested index, got {total}");
-        let title = Some("coordinator.rs — Dictum — Visual Studio Code");
+        let title_owned = format!("coordinator.rs — {folder} — Visual Studio Code");
+        let title = Some(title_owned.as_str());
         // Liveness: the root MUST be active and its symbol map non-empty, so a
         // cue WOULD fire here — identity below is the gate holding, not inertness.
         assert!(!active_roots(&i, title).is_empty(), "root must be active for this test to mean anything");

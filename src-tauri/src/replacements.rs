@@ -29,6 +29,16 @@ pub fn apply_with_cursor(raw: &str, cfg: &Config) -> (String, Option<usize>) {
     // Sentinel-safe by construction — {cursor} only enters via rule values in
     // the loop below, so none exists in the text yet.
     text = canonicalize_vocab(&text, &cfg.vocabulary);
+    // Built-in coding terms sit HERE, in the vocabulary layer, for exactly the
+    // reason above: they must rewrite only what the ear heard, never a rule's or
+    // snippet's literal output (an "api" -> "API" term must not turn a
+    // rule-emitted "https://api.example.com" into "https://API.example.com").
+    // A user rule wanting a different answer runs after this and overrides it.
+    if cfg.coding_terms {
+        for rule in crate::terms::rules() {
+            text = apply_rule(&text, rule);
+        }
+    }
     for rule in &cfg.replacements {
         text = apply_rule(&text, rule);
     }
@@ -75,6 +85,13 @@ fn remove_fillers(text: &str) -> String {
     s.trim().to_string()
 }
 
+/// Test-only window onto `apply_rule` for terms.rs's prose-safety corpus, which
+/// has to exercise the rules exactly as the chain runs them.
+#[cfg(test)]
+pub fn apply_rule_for_test(text: &str, rule: &Replacement) -> String {
+    apply_rule(text, rule)
+}
+
 fn apply_rule(text: &str, rule: &Replacement) -> String {
     if rule.heard.is_empty() {
         return text.to_string();
@@ -99,7 +116,16 @@ mod tests {
         let mut cfg = Config::default();
         cfg.replacements = replacements;
         cfg.remove_fillers = remove_fillers;
+        // These tests exercise the rule engine, not the shipped term table —
+        // `apply_terms` below covers that, against the real data.
+        cfg.coding_terms = false;
         cfg
+    }
+
+    /// The built-in coding-term layer exactly as a user gets it: default config,
+    /// no rules of their own. Drives `terms::rules()` itself, not a copy of it.
+    fn apply_terms(input: &str) -> String {
+        apply(input, &Config::default())
     }
 
     fn rule(heard: &str, printed: &str) -> Replacement {
@@ -356,38 +382,12 @@ mod tests {
         ].iter().map(|(h, p)| rule(h, p)).collect()
     }
 
-    /// Exact mirror of packs.ts CODING_TERMS (38), in array order.
-    fn coding_terms() -> Vec<Replacement> {
-        [
-            ("get hub", "GitHub"), ("git hub", "GitHub"),
-            ("kube control", "kubectl"), ("py test", "pytest"),
-            ("engine x", "nginx"), ("node js", "Node.js"),
-            ("next js", "Next.js"), ("nest js", "NestJS"),
-            ("type script", "TypeScript"), ("java script", "JavaScript"),
-            ("react js", "React"), ("mongo db", "MongoDB"),
-            ("web socket", "WebSocket"), ("local host", "localhost"),
-            ("post gres", "Postgres"), ("c plus plus", "C++"),
-            ("c sharp", "C#"), ("dot net", ".NET"),
-            ("golang", "Go"),
-            ("github", "GitHub"), ("gitlab", "GitLab"),
-            ("typescript", "TypeScript"), ("javascript", "JavaScript"),
-            ("json", "JSON"), ("yaml", "YAML"),
-            ("graphql", "GraphQL"), ("oauth", "OAuth"),
-            ("sqlite", "SQLite"), ("postgres", "Postgres"),
-            ("kubernetes", "Kubernetes"), ("redis", "Redis"),
-            ("api", "API"), ("url", "URL"),
-            ("html", "HTML"), ("css", "CSS"),
-            ("http", "HTTP"), ("https", "HTTPS"),
-            ("sql", "SQL"),
-        ].iter().map(|(h, p)| rule(h, p)).collect()
-    }
-
-    /// Both packs wired as the user gets them when clicking CODE SYMBOLS then
-    /// CODING TERMS (addPack appends in array order). 67 rules, order preserved.
+    /// CODE_SYMBOLS as the user gets it from the WORDS view. The coding-term
+    /// half of the old preset now ships built-in (terms::TERMS), so it is tested
+    /// through `apply_terms` against the real table instead of a mirror.
     fn full_pack() -> Vec<Replacement> {
-        let mut v = code_symbols();
-        v.extend(coding_terms());
-        assert_eq!(v.len(), 67, "packs.ts drifted from this mirror");
+        let v = code_symbols();
+        assert_eq!(v.len(), 29, "packs.ts CODE_SYMBOLS drifted from this mirror");
         v
     }
 
@@ -415,24 +415,6 @@ mod tests {
              "; _ \\ / $ # @ % * ~ ^"),
             // --- CODE_SYMBOLS: prose must NOT be corrupted -------------------
             ("the engine ran hot and the pipe leaked", "the engine ran hot and the pipe leaked"),
-            // --- CODING_TERMS: spelling / multi-word (every entry once) ------
-            ("get hub git hub kube control py test engine x node js next js nest js \
-              type script java script react js mongo db web socket local host post gres \
-              c plus plus c sharp dot net golang",
-             "GitHub GitHub kubectl pytest nginx Node.js Next.js NestJS \
-              TypeScript JavaScript React MongoDB WebSocket localhost Postgres \
-              C++ C# .NET Go"),
-            // --- CODING_TERMS: casing (every entry once); http !-> https -----
-            ("github gitlab typescript javascript json yaml graphql oauth sqlite postgres \
-              kubernetes redis api url html css http https sql",
-             "GitHub GitLab TypeScript JavaScript JSON YAML GraphQL OAuth SQLite Postgres \
-              Kubernetes Redis API URL HTML CSS HTTP HTTPS SQL"),
-            // --- SUBSTRING SAFETY: the crown jewel. Every term here is a
-            //     substring of a real English/tech word; NONE may fire. ------
-            ("curl the rapid apiary in mysql and postgresql success",
-             "curl the rapid apiary in mysql and postgresql success"),
-            // golang != go: bare "go" is deliberately not a rule.
-            ("go to the repo", "go to the repo"),
         ];
         for (input, expected) in cases {
             // Collapse the source-wrapped whitespace so multi-line literals above
@@ -444,13 +426,71 @@ mod tests {
     }
 
     #[test]
+    fn built_in_terms_corpus() {
+        // Was the CODING_TERMS half of the preset corpus; now runs against
+        // terms::TERMS itself, so the shipped table is what is under test.
+        let cases: &[(&str, &str)] = &[
+            // spelling / multi-word — only a rule can do these
+            ("get hub git hub kube control py test engine x node js next js nest js               type script java script react js mongo db web socket local host post gres               c plus plus c sharp dot net golang",
+             "GitHub GitHub kubectl pytest nginx Node.js Next.js NestJS               TypeScript JavaScript React MongoDB WebSocket localhost Postgres               C++ C# .NET Go"),
+            // casing; http must not become https
+            ("github gitlab typescript javascript json yaml graphql oauth sqlite postgres               kubernetes redis api url html css http https sql",
+             "GitHub GitLab TypeScript JavaScript JSON YAML GraphQL OAuth SQLite Postgres               Kubernetes Redis API URL HTML CSS HTTP HTTPS SQL"),
+            // SUBSTRING SAFETY: every term here is a substring of a real word.
+            ("curl the rapid apiary in mysql and postgresql success",
+             "curl the rapid apiary in mysql and postgresql success"),
+            // golang != go: bare "go" is deliberately not a rule.
+            ("go to the repo", "go to the repo"),
+            // PROSE SAFETY: the terms the table deliberately leaves to the ear,
+            // because a rule would corrupt ordinary sentences.
+            ("i flew to tokyo and read about quarks", "i flew to tokyo and read about quarks"),
+        ];
+        for (input, expected) in cases {
+            let want: String = expected.split_whitespace().collect::<Vec<_>>().join(" ");
+            let got: String = apply_terms(input).split_whitespace().collect::<Vec<_>>().join(" ");
+            assert_eq!(got, want, "built-in term corpus failed on input: {input:?}");
+        }
+    }
+
+    #[test]
+    fn built_in_terms_respect_the_off_switch() {
+        let mut cfg = Config::default();
+        cfg.coding_terms = false;
+        assert_eq!(apply("deploy engine x and json", &cfg), "deploy engine x and json");
+        assert_eq!(apply_terms("deploy engine x and json"), "deploy nginx and JSON");
+    }
+
+    #[test]
+    fn a_user_rule_overrides_a_built_in_term() {
+        // Built-ins run in the vocabulary layer, ahead of the user's rules, so a
+        // user rule sees their output and gets the last word.
+        let mut cfg = cfg_with(vec![rule("nginx", "NGINX")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("restart engine x now", &cfg), "restart NGINX now");
+    }
+
+    #[test]
+    fn built_in_terms_never_recase_rule_output() {
+        // The URL hazard the vocabulary layer exists to avoid: a rule emitting a
+        // literal must not then be re-cased by "api" -> "API".
+        let mut cfg = cfg_with(vec![rule("the endpoint", "https://api.example.com")], false);
+        cfg.coding_terms = true;
+        assert_eq!(apply("hit the endpoint twice", &cfg), "hit https://api.example.com twice");
+    }
+
+    #[test]
     fn pack_is_idempotent() {
         // Casing rules run over spelling-rule output in the same pass; a second
         // pass must be a fixpoint (no double-transform, no oscillation).
         for once in ["github", "type script and typescript", "http https", "sqlite sql"] {
+            let a = apply_terms(once);
+            let b = apply_terms(&a);
+            assert_eq!(a, b, "built-in terms not idempotent for {once:?}");
+        }
+        for once in ["open brace x close brace", "double colon path"] {
             let a = apply_pack(once);
             let b = apply_pack(&a);
-            assert_eq!(a, b, "pack not idempotent for {once:?}");
+            assert_eq!(a, b, "symbol pack not idempotent for {once:?}");
         }
     }
 
@@ -461,8 +501,18 @@ mod tests {
         // "caret" (often meaning the text cursor) therefore convert in prose.
         // Documented so a future edit doesn't "fix" it by accident.
         assert_eq!(apply_pack("please underscore the caret position"), "please _ the ^ position");
-        // Likewise "engine x-axis": trailing '-' is a boundary, so nginx fires.
-        assert_eq!(apply_pack("the engine x-axis"), "the nginx-axis");
+    }
+
+    #[test]
+    fn built_in_terms_fire_across_a_hyphen_boundary() {
+        // SAME LOCKED TRADEOFF, now on by default. A trailing '-' is a word
+        // boundary, so "engine x-axis" becomes "nginx-axis". It was an accepted
+        // cost when CODING_TERMS was a button the user pressed; shipping the
+        // table on by default spreads it to everyone who never opted in.
+        // Kept because "engine x" -> nginx is the single most valuable row in the
+        // table and the colliding phrase is vanishingly rare — but it is the one
+        // row whose blast radius grew, so it is asserted, not assumed.
+        assert_eq!(apply_terms("the engine x-axis"), "the nginx-axis");
     }
 
     // --- vocab canonicalization attacks --------------------------------

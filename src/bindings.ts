@@ -45,6 +45,10 @@ export interface Config {
   /** Live streaming partial preview in the HUD (companion Nemotron model).
    *  Never affects injected text — Parakeet stays authoritative. Default off. */
   streamingPreview: boolean;
+  /** Built-in coding vocabulary applied as replacement rules. Default on. */
+  codingTerms: boolean;
+  /** ASR contextual biasing (hotwords + modified_beam_search). Default on. */
+  asrBiasing: boolean;
 }
 
 export interface LevelBar { amp: number; clip: boolean }
