@@ -1,6 +1,6 @@
 // SETUP view (§5.4) — a printed form: label column left, controls right.
 import { api } from "../bindings";
-import type { AppOverride, HotkeyMode, Retention, Theme } from "../bindings";
+import type { AppOverride, HotkeyMode, ReformatDevice, ReformatMode, Retention, Theme } from "../bindings";
 import { h, applyTheme } from "../shared";
 import { chordDisplay, retentionLabel, runDownloadFlow, type Ctx } from "./main";
 
@@ -24,6 +24,47 @@ function toggleRow(label: string, note: string | null, checked: boolean, disable
   ]);
   if (note) row.append(h("span", { class: "value-sm note" }, note));
   return row;
+}
+
+/** Segmented strip with radio semantics (§4): one bordered row, the selected
+ * cell inverted, its caption printed under the strip. Arrow keys move within
+ * the group (§8). Returns the wrapper (strip + caption). */
+function segmented<T extends string>(
+  name: string,
+  options: [T, string, string?][],
+  value: T,
+  onChange: (v: T) => void,
+): HTMLElement {
+  const strip = h("div", { class: "seg", role: "radiogroup", "aria-label": name });
+  const desc = h("div", { class: "value-sm seg-desc" });
+  const btns: HTMLButtonElement[] = [];
+  const select = (v: T) => {
+    btns.forEach((b, i) => {
+      const on = options[i][0] === v;
+      b.setAttribute("aria-checked", String(on));
+      // Roving tabindex: a radiogroup is ONE tab stop (§8) — arrows move inside
+      // it. Native radios get this free; these buttons have to be told.
+      b.tabIndex = on ? 0 : -1;
+    });
+    const d = options.find((o) => o[0] === v)?.[2];
+    desc.textContent = d ?? "";
+    desc.hidden = !d;
+  };
+  options.forEach(([v, label], i) => {
+    const b = h("button", { role: "radio", "aria-checked": "false", onclick: () => { select(v); onChange(v); } }, label);
+    b.addEventListener("keydown", (e) => {
+      const step = e.key === "ArrowRight" || e.key === "ArrowDown" ? 1 : e.key === "ArrowLeft" || e.key === "ArrowUp" ? -1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      const next = btns[(i + step + btns.length) % btns.length];
+      next.focus();
+      next.click();
+    });
+    btns.push(b);
+    strip.append(b);
+  });
+  select(value);
+  return h("div", { class: "segwrap" }, [strip, desc]);
 }
 
 // ---------------------------------------------------------------------------
@@ -131,31 +172,16 @@ function buildKeySection(ctx: Ctx): HTMLElement {
 
   chip.addEventListener("click", arm);
 
-  const modes: [HotkeyMode, string, string][] = [
+  const modes = segmented<HotkeyMode>("Hotkey mode", [
     ["hold", "HOLD", "PUSH-TO-TALK. RELEASE PRINTS."],
     ["toggle", "TOGGLE", "TAP ON, TAP OFF."],
     ["both", "BOTH", "TAP TOGGLES · HOLD TALKS."],
-  ];
-  const radios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Hotkey mode" });
-  for (const [val, label, desc] of modes) {
-    const input = h("input", { type: "radio", name: "hotkey-mode", value: val });
-    input.checked = ctx.config.hotkeyMode === val;
-    input.addEventListener("change", () => {
-      if (!input.checked) return;
-      ctx.config.hotkeyMode = val;
-      ctx.persistNow();
-    });
-    radios.append(
-      h("label", { class: "radio" }, [
-        input,
-        h("span", { class: "box" }),
-        h("span", { class: "label" }, label),
-        h("span", { class: "value-sm desc" }, desc),
-      ]),
-    );
-  }
+  ], ctx.config.hotkeyMode, (v) => {
+    ctx.config.hotkeyMode = v;
+    ctx.persistNow();
+  });
 
-  const body = h("div", {}, [chip, note, radios]);
+  const body = h("div", {}, [chip, note, modes]);
   return sect("KEY", "THE ONLY KEY DICTUM OWNS.", body);
 }
 
@@ -164,12 +190,15 @@ function buildKeySection(ctx: Ctx): HTMLElement {
 // ---------------------------------------------------------------------------
 function buildInputSection(ctx: Ctx): HTMLElement {
   const select = h("select", { class: "field-input mono" });
+  // Mic health lives here now, not on the tape.
+  const note = h("div", { class: "value-sm sect-note" });
   const fillOptions = () => {
     select.innerHTML = "";
     select.append(h("option", { value: "" }, "SYSTEM DEFAULT"));
     for (const d of ctx.devices) select.append(h("option", { value: d }, d.toUpperCase()));
     select.value = ctx.config.inputDevice ?? "";
     if (select.selectedIndex < 0) select.value = ""; // configured device unplugged
+    note.textContent = ctx.devices.length ? "FOLLOWS SYSTEM DEFAULT WHEN UNSET." : "NO MICROPHONE FOUND.";
   };
   fillOptions();
   // Devices can change between visits — refresh and patch in place.
@@ -187,7 +216,7 @@ function buildInputSection(ctx: Ctx): HTMLElement {
 
   const body = h("div", {}, [
     h("div", { class: "select-wrap device-select" }, [select]),
-    h("div", { class: "value-sm sect-note" }, "FOLLOWS SYSTEM DEFAULT WHEN UNSET."),
+    note,
     h("div", { class: "meter" }, [fill]),
     toggleRow("AUDIO CUES", "CLICKS ON START · STOP · KILL · ERROR. NEVER ON SUCCESS.", ctx.config.audioCues, false, (on) => {
       ctx.config.audioCues = on;
@@ -282,59 +311,33 @@ function buildModelSection(ctx: Ctx): HTMLElement {
 // ---------------------------------------------------------------------------
 // REFORMATTER — LLM rewrite of the deterministic ASR text (0.3).
 // ---------------------------------------------------------------------------
-const REFORMAT_MODES: [string, string, string][] = [
+const REFORMAT_MODES: [ReformatMode, string, string][] = [
   ["auto", "AUTO", "GPU-GATED. REWRITES WHEN A MODEL IS PRESENT."],
   ["on", "ON", "ALWAYS REWRITE WHEN A MODEL IS PRESENT."],
   ["off", "OFF", "NEVER REWRITE. DETERMINISTIC ONLY."],
 ];
 
-const REFORMAT_DEVICES: [string, string, string][] = [
+const REFORMAT_DEVICES: [ReformatDevice, string, string][] = [
   ["auto", "AUTO", "MATCH THE GPU GATE."],
   ["gpu", "GPU", "ALWAYS OFFLOAD (VULKAN BUILD)."],
   ["cpu", "CPU", "ALWAYS RUN ON CPU."],
 ];
 
 function buildReformatSection(ctx: Ctx): HTMLElement {
-  // Mode: AUTO / ON / OFF — same radio grammar as the hotkey mode.
-  const radios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter mode" });
-  for (const [val, label, desc] of REFORMAT_MODES) {
-    const input = h("input", { type: "radio", name: "reformat-mode", value: val });
-    input.checked = ctx.config.reformat === val;
-    input.addEventListener("change", () => {
-      if (!input.checked) return;
-      ctx.config.reformat = val as typeof ctx.config.reformat;
-      ctx.persistNow();
-    });
-    radios.append(
-      h("label", { class: "radio" }, [
-        input,
-        h("span", { class: "box" }),
-        h("span", { class: "label" }, label),
-        h("span", { class: "value-sm desc" }, desc),
-      ]),
-    );
-  }
+  // Mode: AUTO / ON / OFF — same segmented grammar as the hotkey mode.
+  // Debounced: arrow traversal fires onChange per step, and a device change
+  // drops and reloads the LLM — only the value the user lands on should persist.
+  const mode = segmented<ReformatMode>("Reformatter mode", REFORMAT_MODES, ctx.config.reformat, (v) => {
+    ctx.config.reformat = v;
+    ctx.persist();
+  });
 
   // Device: AUTO / GPU / CPU — where the reformatter runs. GPU is faster; CPU
   // spares the GPU (e.g. on battery). Only bites on a Vulkan build.
-  const deviceRadios = h("div", { class: "mode-radios", role: "radiogroup", "aria-label": "Reformatter device" });
-  for (const [val, label, desc] of REFORMAT_DEVICES) {
-    const input = h("input", { type: "radio", name: "reformat-device", value: val });
-    input.checked = ctx.config.reformatDevice === val;
-    input.addEventListener("change", () => {
-      if (!input.checked) return;
-      ctx.config.reformatDevice = val as typeof ctx.config.reformatDevice;
-      ctx.persistNow();
-    });
-    deviceRadios.append(
-      h("label", { class: "radio" }, [
-        input,
-        h("span", { class: "box" }),
-        h("span", { class: "label" }, label),
-        h("span", { class: "value-sm desc" }, desc),
-      ]),
-    );
-  }
+  const device = segmented<ReformatDevice>("Reformatter device", REFORMAT_DEVICES, ctx.config.reformatDevice, (v) => {
+    ctx.config.reformatDevice = v;
+    ctx.persist();
+  });
 
   // One-line AUTO explanation: which SKU the GPU gate picked on this machine.
   const g = ctx.gpu;
@@ -400,12 +403,12 @@ function buildReformatSection(ctx: Ctx): HTMLElement {
   update();
   ctx.reformatCardUpdate = update;
 
+  device.append(h("div", { class: "value-sm sect-note" }, gpuLine));
+  // Three sub-rows so MODE and COMPUTE never read as one six-way list.
   const body = h("div", {}, [
-    radios,
-    h("div", { class: "value-sm sect-note" }, gpuLine),
-    h("div", { class: "value-sm sect-note" }, "COMPUTE — GPU IS FASTER; CPU SPARES THE GPU ON BATTERY."),
-    deviceRadios,
-    cards,
+    h("div", { class: "subrow" }, [h("span", { class: "microlabel" }, "MODE"), mode]),
+    h("div", { class: "subrow" }, [h("span", { class: "microlabel" }, "COMPUTE"), device]),
+    h("div", { class: "subrow" }, [h("span", { class: "microlabel" }, "MODELS"), cards]),
   ]);
   return sect("REFORMATTER", "A LOCAL LLM REWRITE OF THE ASR TEXT. RAW STAYS ON THE TAPE.", body);
 }
@@ -416,31 +419,20 @@ function buildReformatSection(ctx: Ctx): HTMLElement {
 const RETENTIONS: Retention[] = ["keepNothing", "hours24", "days7", "days30", "forever"];
 
 function buildPrivacySection(ctx: Ctx): HTMLElement {
-  const retention = h("div", { class: "retention", role: "radiogroup", "aria-label": "Retention" });
-  const chips: HTMLButtonElement[] = [];
-  for (const r of RETENTIONS) {
-    const b = h("button", {
-      role: "radio",
-      "aria-checked": String(ctx.config.retention === r),
-      onclick: () => {
-        ctx.config.retention = r;
-        chips.forEach((c, i) => c.setAttribute("aria-checked", String(RETENTIONS[i] === r)));
-        ctx.persistNow();
-        ctx.updateFooter();
-      },
-    }, retentionLabel(r));
-    // Arrow keys move within the retention chips (§8).
-    b.addEventListener("keydown", (e) => {
-      const i = RETENTIONS.indexOf(r);
-      if (e.key === "ArrowRight" || e.key === "ArrowDown") chips[(i + 1) % chips.length]?.focus();
-      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") chips[(i - 1 + chips.length) % chips.length]?.focus();
-    });
-    chips.push(b);
-    retention.append(b);
-  }
+  const retention = segmented<Retention>(
+    "Retention",
+    RETENTIONS.map((r): [Retention, string] => [r, retentionLabel(r)]),
+    ctx.config.retention,
+    (r) => {
+      ctx.config.retention = r;
+      ctx.persist(); // debounced: crossing the strip by arrow is one write
+      ctx.updateFooter();
+    },
+  );
+  retention.classList.add("retention");
   const setRetentionDisabled = (off: boolean) => {
     retention.classList.toggle("disabled", off);
-    chips.forEach((c) => (c.disabled = off));
+    retention.querySelectorAll("button").forEach((c) => (c.disabled = off));
   };
   setRetentionDisabled(!ctx.config.keepTranscripts);
 
